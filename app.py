@@ -1,355 +1,372 @@
 """
-Outfit Recommender — Streamlit app
-Deploy via GitHub + Streamlit Community Cloud (share.streamlit.io).
+Outfit Recommender System
+=========================
+Adapted from Practical 8 (Parts I, II, III) - movie recommender -> outfit recommender.
 
-Runs on a built-in SYNTHETIC catalogue out of the box (no setup needed).
-Synthetic items are rendered as simple garment-silhouette icons (top/pants/
-skirt/dress/shoe shapes) in the item's colour, so results look like
-recognizable clothing rather than plain colour blocks.
+The structure below follows the practicals directly:
+  Section 1 : Data Preparation            (Practical 8 Part II, Section 1)
+  Section 2 : Features Generation         (Practical 8 Part II, Section 2)
+  Section 3 : Content-Based Recommender   (Practical 8 Part II, Section 3)
+  Section 4 : Collaborative Filtering     (Practical 8 Part III)
+  Section 5 : Hybrid (content + collaborative)
 
-To use REAL Kaggle photos: add a folder named `sample_data/` next to this file,
-containing `styles.csv` + an `images/` folder (a subset exported from your
-Colab notebook). The app auto-detects it and switches over automatically.
+Main change from the movie version: a movie recommender returns items in the
+SAME category (Spider-Man -> more superhero films). An outfit recommender must
+return a DIFFERENT category (a shirt -> trousers/skirts), so we filter the
+candidates to complementary categories before ranking them.
+
+Data required (real Kaggle photos):
+  sample_data/styles.csv
+  sample_data/images/<id>.jpg
+Exported from the Kaggle "Fashion Product Images (Small)" dataset.
 """
-import os, glob, random
+
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import linear_kernel, cosine_similarity
 
-random.seed(42); np.random.seed(42)
 st.set_page_config(page_title="Outfit Recommender", layout="wide")
 
-# ----------------------------------------------------------------------------
-# DOMAIN RULES
-# ----------------------------------------------------------------------------
-TOPS    = ['Shirts', 'Tshirts', 'Tops', 'Sweaters', 'Sweatshirts', 'Kurtas']
-BOTTOMS = ['Jeans', 'Trousers', 'Skirts', 'Shorts', 'Track Pants', 'Leggings']
-DRESSES = ['Dresses']
-SHOES   = ['Casual Shoes', 'Heels', 'Sandals', 'Sports Shoes', 'Flats', 'Formal Shoes']
-ALL_TYPES = TOPS + BOTTOMS + DRESSES + SHOES
+DATA_DIR = "sample_data"
+CSV_PATH = os.path.join(DATA_DIR, "styles.csv")
+IMG_DIR = os.path.join(DATA_DIR, "images")
 
+# ---------------------------------------------------------------------------
+# Clothing category rules (the outfit-specific part of this project)
+# ---------------------------------------------------------------------------
+TOPS = ["Shirts", "Tshirts", "Tops", "Sweaters", "Sweatshirts", "Kurtas"]
+BOTTOMS = ["Jeans", "Trousers", "Skirts", "Shorts", "Track Pants", "Leggings"]
+DRESSES = ["Dresses"]
+SHOES = ["Casual Shoes", "Heels", "Sandals", "Sports Shoes", "Flats", "Formal Shoes"]
+
+# Which categories COMPLETE a given category
 COMPLEMENT = {}
-for t in TOPS:    COMPLEMENT[t] = BOTTOMS + SHOES
-for b in BOTTOMS: COMPLEMENT[b] = TOPS + SHOES
-for d in DRESSES: COMPLEMENT[d] = SHOES
-for s in SHOES:   COMPLEMENT[s] = TOPS + BOTTOMS + DRESSES
+for t in TOPS:
+    COMPLEMENT[t] = BOTTOMS + SHOES
+for b in BOTTOMS:
+    COMPLEMENT[b] = TOPS + SHOES
+for d in DRESSES:
+    COMPLEMENT[d] = SHOES
+for s in SHOES:
+    COMPLEMENT[s] = TOPS + BOTTOMS + DRESSES
 
-SLOT = {}
-for t in TOPS:    SLOT[t] = 'top'
-for b in BOTTOMS: SLOT[b] = 'bottom'
-for d in DRESSES: SLOT[d] = 'dress'
-for s in SHOES:   SLOT[s] = 'shoe'
+# Simple colour-matching rule: neutrals go with anything
+NEUTRALS = {"Black", "White", "Grey", "Navy Blue", "Beige", "Brown", "Cream"}
 
-NEUTRALS = {'Black','White','Grey','Navy Blue','Beige','Brown','Cream'}
-HARMONY = [
-    {'Blue','Navy Blue','White','Grey'}, {'Red','Black','White','Maroon'},
-    {'Pink','White','Grey','Maroon'}, {'Green','Beige','Brown','White'},
-    {'Yellow','Blue','White','Grey'},
-]
+
 def colour_score(c1, c2):
-    if c1 in NEUTRALS or c2 in NEUTRALS: return 1.0
-    if c1 == c2: return 0.8
-    for g in HARMONY:
-        if c1 in g and c2 in g: return 0.7
-    return 0.2
+    """1.0 = matches well, 0.8 = same colour, 0.3 = weak match."""
+    if c1 in NEUTRALS or c2 in NEUTRALS:
+        return 1.0
+    if c1 == c2:
+        return 0.8
+    return 0.3
 
-def season_ok(s1, s2):
-    return (s1==s2) or ({'Fall','Winter'} <= {s1,s2}) or ({'Spring','Summer'} <= {s1,s2})
 
-# rough RGB anchors for dominant-colour detection from an uploaded photo
-COLOUR_ANCHORS = {
-    'Black':(20,20,20), 'White':(245,245,245), 'Grey':(150,150,150),
-    'Navy Blue':(30,40,80), 'Blue':(50,100,190), 'Red':(190,40,40),
-    'Maroon':(110,30,45), 'Green':(50,140,80), 'Olive':(110,110,40),
-    'Yellow':(225,200,60), 'Beige':(220,205,175), 'Brown':(110,70,40),
-    'Pink':(230,140,170), 'Purple':(110,60,140), 'Orange':(220,120,40),
-    'Silver':(192,192,192), 'Cream':(245,240,215),
-}
+# ---------------------------------------------------------------------------
+# Section 1 - Data Preparation      (Practical 8 Part II, Section 1)
+# ---------------------------------------------------------------------------
+@st.cache_data
+def load_data():
+    """Load styles.csv, keep only items we have rules and images for."""
+    df = pd.read_csv(CSV_PATH, on_bad_lines="skip")
+    df = df[df["articleType"].isin(COMPLEMENT.keys())]
+    df = df.dropna(subset=["gender", "articleType", "baseColour", "season", "usage"])
+    df = df[df["id"].apply(lambda i: os.path.exists(os.path.join(IMG_DIR, f"{i}.jpg")))]
+    return df.reset_index(drop=True)
 
-def detect_dominant_colour(img: Image.Image, available_colours):
-    small = np.array(img.convert('RGB').resize((50, 50))).reshape(-1, 3).mean(axis=0)
-    options = {k: v for k, v in COLOUR_ANCHORS.items() if k in available_colours}
-    if not options:
-        return available_colours[0]
-    best = min(options, key=lambda k: np.linalg.norm(np.array(options[k]) - small))
-    return best
 
-# ----------------------------------------------------------------------------
-# DATA LOADING (cached so it only runs once per app session)
-# ----------------------------------------------------------------------------
-COLS = ['id','gender','masterCategory','subCategory','articleType',
-        'baseColour','season','year','usage','productDisplayName']
-
-def icon_kind_for(article_type):
-    """Maps an articleType to which silhouette shape to draw."""
-    if article_type == 'Skirts': return 'skirt'
-    if article_type in BOTTOMS: return 'pants'
-    if article_type in TOPS: return 'top'
-    if article_type in DRESSES: return 'dress'
-    if article_type == 'Heels': return 'heel'
-    if article_type == 'Sandals': return 'sandal'
-    if article_type in SHOES: return 'shoe'
-    return 'shoe'
-
-def draw_garment_icon(kind, color_rgb, size=(160, 200)):
-    """Draws a simple, recognizable garment silhouette filled with color_rgb,
-    so placeholder items look like clothing rather than plain rectangles."""
-    img = Image.new('RGB', size, (250, 250, 250))
-    d = ImageDraw.Draw(img)
-    w, h = size
-    outline = (70, 70, 70)
-
-    if kind == 'top':
-        bt, bb = h*0.30, h*0.85
-        bl, br = w*0.28, w*0.72
-        d.polygon([(bl, bt), (w*0.04, h*0.42), (w*0.04, h*0.58), (bl, bt+h*0.14)], fill=color_rgb, outline=outline)
-        d.polygon([(br, bt), (w*0.96, h*0.42), (w*0.96, h*0.58), (br, bt+h*0.14)], fill=color_rgb, outline=outline)
-        d.rectangle([bl, bt, br, bb], fill=color_rgb, outline=outline)
-        d.ellipse([w*0.40, bt-h*0.05, w*0.60, bt+h*0.06], fill=(250,250,250), outline=outline)
-    elif kind == 'pants':
-        ty, by = h*0.16, h*0.88
-        wl, wr = w*0.30, w*0.70
-        mid = w*0.50
-        d.polygon([(wl, ty), (mid-3, ty), (mid-7, by), (w*0.34, by)], fill=color_rgb, outline=outline)
-        d.polygon([(mid+3, ty), (wr, ty), (w*0.66, by), (mid+7, by)], fill=color_rgb, outline=outline)
-    elif kind == 'skirt':
-        d.polygon([(w*0.35, h*0.20), (w*0.65, h*0.20), (w*0.82, h*0.82), (w*0.18, h*0.82)], fill=color_rgb, outline=outline)
-    elif kind == 'dress':
-        d.polygon([(w*0.38, h*0.18), (w*0.62, h*0.18), (w*0.80, h*0.85), (w*0.20, h*0.85)], fill=color_rgb, outline=outline)
-        d.polygon([(w*0.38, h*0.18), (w*0.14, h*0.32), (w*0.24, h*0.40), (w*0.38, h*0.29)], fill=color_rgb, outline=outline)
-        d.polygon([(w*0.62, h*0.18), (w*0.86, h*0.32), (w*0.76, h*0.40), (w*0.62, h*0.29)], fill=color_rgb, outline=outline)
-        d.ellipse([w*0.42, h*0.14, w*0.58, h*0.23], fill=(250,250,250), outline=outline)
-    elif kind == 'heel':
-        d.polygon([(w*0.18, h*0.62), (w*0.75, h*0.55), (w*0.85, h*0.68), (w*0.20, h*0.72)], fill=color_rgb, outline=outline)
-        d.polygon([(w*0.75, h*0.68), (w*0.80, h*0.90), (w*0.68, h*0.90), (w*0.68, h*0.70)], fill=color_rgb, outline=outline)
-        d.polygon([(w*0.18, h*0.62), (w*0.22, h*0.45), (w*0.55, h*0.42), (w*0.75, h*0.55)], fill=color_rgb, outline=outline)
-    elif kind == 'sandal':
-        d.ellipse([w*0.15, h*0.68, w*0.85, h*0.82], fill=color_rgb, outline=outline)
-        d.line([(w*0.50, h*0.68), (w*0.35, h*0.45), (w*0.65, h*0.45), (w*0.50, h*0.68)], fill=outline, width=3)
-    else:  # generic shoe
-        d.ellipse([w*0.10, h*0.60, w*0.90, h*0.80], fill=color_rgb, outline=outline)
-        d.polygon([(w*0.15, h*0.64), (w*0.18, h*0.40), (w*0.55, h*0.35), (w*0.75, h*0.60)], fill=color_rgb, outline=outline)
-    return img
-
-def make_synthetic(n=450, img_dir='synthetic_images'):
-    os.makedirs(img_dir, exist_ok=True)
-    rgb = {'Black':(30,30,30),'White':(240,240,240),'Grey':(150,150,150),
-           'Navy Blue':(40,50,90),'Beige':(225,210,180),'Brown':(120,80,50),
-           'Cream':(250,245,225),'Blue':(60,110,200),'Red':(200,50,50),
-           'Green':(60,150,90),'Pink':(235,150,180),'Yellow':(235,210,70),'Maroon':(120,40,55)}
-    colours = list(rgb.keys()); genders=['Men','Women','Unisex']
-    seasons=['Summer','Winter','Fall','Spring']; usages=['Casual','Formal','Sports','Ethnic']
-    rows = []
-    for i in range(n):
-        at = random.choice(ALL_TYPES)
-        sub = ('Topwear' if at in TOPS else 'Bottomwear' if at in BOTTOMS
-               else 'Dress' if at in DRESSES else 'Shoes')
-        mc = 'Footwear' if at in SHOES else 'Apparel'
-        col = random.choice(colours); g = random.choice(genders)
-        pid = 100000 + i
-        rows.append([pid, g, mc, sub, at, col, random.choice(seasons), 2018,
-                     random.choice(usages), f"{g} {col} {at}"])
-        icon = draw_garment_icon(icon_kind_for(at), rgb[col])
-        icon.save(f"{img_dir}/{pid}.jpg")
-    return pd.DataFrame(rows, columns=COLS), img_dir
-
-@st.cache_data(show_spinner="Loading catalogue...")
-def load_catalog():
-    hits = glob.glob('sample_data/**/styles.csv', recursive=True)
-    for h in hits:
-        img = os.path.join(os.path.dirname(h), 'images')
-        if os.path.isdir(img):
-            df = pd.read_csv(h, on_bad_lines='skip')
-            df = df[df['articleType'].isin(COMPLEMENT.keys())].copy()
-            df = df.dropna(subset=['gender','articleType','baseColour','season','usage']).reset_index(drop=True)
-            return df, img, False
-    df, img = make_synthetic()
-    return df, img, True
-
-@st.cache_data(show_spinner="Building similarity model...")
-def build_models(df):
-    soup = (df['gender'] + ' ' + df['usage'] + ' ' + df['season'] + ' '
-            + df['baseColour'].str.replace(' ', '') + ' ' + df['articleType'])
+# ---------------------------------------------------------------------------
+# Section 2 - Features Generation   (Practical 8 Part II, Section 2)
+# The movie version used the 'overview' text. Here we build the same kind of
+# text from the item's attributes, then TF-IDF + cosine similarity.
+# ---------------------------------------------------------------------------
+@st.cache_data
+def build_similarity(df):
+    soup = (
+        df["gender"] + " " + df["usage"] + " " + df["season"] + " "
+        + df["baseColour"].str.replace(" ", "") + " " + df["articleType"]
+    )
     tfidf = TfidfVectorizer()
-    mat = tfidf.fit_transform(soup)
-    cos = cosine_similarity(mat, mat)
+    tfidf_matrix = tfidf.fit_transform(soup)
+    cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)   # same as practical
+    return cosine_sim
 
-    # simulate outfits + purchases (same logic as the main notebook) for
-    # collaborative filtering + ground truth
-    def compatible(a, b):
-        if b['articleType'] not in COMPLEMENT.get(a['articleType'], []): return False
-        if not (a['gender']==b['gender'] or 'Unisex' in (a['gender'],b['gender'])): return False
-        if a['usage'] != b['usage']: return False
-        if not season_ok(a['season'], b['season']): return False
-        return colour_score(a['baseColour'], b['baseColour']) >= 0.5
 
-    anchors = df.index[df['articleType'].isin(TOPS+DRESSES)].tolist()
-    outfits = []
-    for anc in anchors:
-        a = df.loc[anc]
-        cand = df[df['articleType'].isin(COMPLEMENT[a['articleType']])]
-        for _, b in cand.sample(min(30, len(cand)), random_state=anc).iterrows():
-            if compatible(a, b): outfits.append((a['id'], b['id']))
-    outfits = list(set(outfits))
+# ---------------------------------------------------------------------------
+# Section 3 - Content-Based Recommender   (Practical 8 Part II, Section 3)
+# Same steps as the practical: get index -> score all items -> sort -> top K.
+# Added step: keep only COMPLEMENTARY categories, and add a colour score.
+# ---------------------------------------------------------------------------
+def find_candidates(df, item):
+    """Candidate items = complementary categories only.
 
-    inter = []
-    for u in range(60):
-        for _ in range(random.randint(8, 18)):
-            if outfits:
-                x, y = random.choice(outfits); inter += [(u, x), (u, y)]
-    inter_df = pd.DataFrame(inter, columns=['user_id','item_id']).drop_duplicates()
-    inter_df['rating'] = 1
-    ui = inter_df.pivot_table(index='user_id', columns='item_id', values='rating').fillna(0)
-    item_sim_df = pd.DataFrame(cosine_similarity(ui.T), index=ui.columns, columns=ui.columns) if not ui.empty else pd.DataFrame()
-    return cos, tfidf, item_sim_df
+    We prefer a strict match (same occasion and gender), but if the product
+    sample is small that can leave nothing to recommend, so we relax the
+    filters step by step instead of returning an empty result.
+    """
+    base = df[df["articleType"].isin(COMPLEMENT[item["articleType"]])]
 
-# ----------------------------------------------------------------------------
-# RECOMMENDER LOGIC (with diversify fix: guarantees representation per slot)
-# ----------------------------------------------------------------------------
-def diversify(cand_df, score_col, k=5):
-    cand_df = cand_df.copy()
-    cand_df['slot'] = cand_df['articleType'].map(SLOT)
-    cand_df = cand_df.sort_values(score_col, ascending=False)
+    strict = base[
+        (base["usage"] == item["usage"])
+        & (base["gender"].isin([item["gender"], "Unisex"]))
+    ]
+    if len(strict) >= 3:
+        return strict.copy()
+
+    same_usage = base[base["usage"] == item["usage"]]
+    if len(same_usage) >= 3:
+        return same_usage.copy()
+
+    return base.copy()
+
+
+def get_recommendations(item_id, df, cosine_sim, indices, k=5):
+    idx = indices[item_id]
+    item = df.iloc[idx]
+
+    candidates = find_candidates(df, item)
+    if candidates.empty:
+        return []
+
+    positions = indices[candidates["id"]].values
+    style = cosine_sim[idx, positions]
+    colour = candidates["baseColour"].apply(lambda c: colour_score(item["baseColour"], c)).values
+
+    candidates["score"] = 0.5 * style + 0.5 * colour
+    candidates = candidates.sort_values("score", ascending=False)
+    return balanced_top_k(candidates, k)
+
+
+def balanced_top_k(candidates, k=5):
+    """Take the best item from each clothing group first, then fill the rest.
+    Without this, one group (e.g. shoes) can fill all K slots."""
+    groups = [TOPS, BOTTOMS, DRESSES, SHOES]
     chosen = []
-    for slot in cand_df['slot'].dropna().unique():
-        sub = cand_df[cand_df['slot'] == slot]
+    for types in groups:
+        sub = candidates[candidates["articleType"].isin(types)]
         if not sub.empty:
-            chosen.append(sub.iloc[0]['id'])
-    for _, row in cand_df.iterrows():
-        if len(chosen) >= k: break
-        if row['id'] not in chosen:
-            chosen.append(row['id'])
+            chosen.append(sub.iloc[0]["id"])
+    for item_id in candidates["id"]:
+        if len(chosen) >= k:
+            break
+        if item_id not in chosen:
+            chosen.append(item_id)
     return chosen[:k]
 
-def complete_the_look(df, cos, id_to_pos, item_id, k=5):
-    i = id_to_pos[item_id]; a = df.iloc[i]
-    cand = df[df['articleType'].isin(COMPLEMENT[a['articleType']])].copy()
-    cand = cand[(cand['gender'].isin([a['gender'],'Unisex'])) | (a['gender']=='Unisex')]
-    cand = cand[cand['usage'] == a['usage']]
-    cand = cand[cand['season'].apply(lambda s: season_ok(s, a['season']))]
-    if cand.empty: return []
-    cand_idx = cand['id'].map(id_to_pos).values
-    cand['style']  = cos[i, cand_idx]
-    cand['colour'] = cand['baseColour'].apply(lambda c: colour_score(a['baseColour'], c))
-    cand['final']  = 0.5*cand['style'] + 0.5*cand['colour']
-    return diversify(cand, 'final', k)
 
-def collaborative_recommend(df, item_sim_df, item_id, k=5):
-    if item_sim_df.empty or item_id not in item_sim_df.index:
+# ---------------------------------------------------------------------------
+# Section 4 - Collaborative Filtering   (Practical 8 Part III)
+# The practical read real user ratings. The Kaggle catalogue has no purchase
+# history, so we simulate users who buy matching pairs together.
+# (State this clearly as a limitation in the report.)
+# ---------------------------------------------------------------------------
+@st.cache_data
+def build_collaborative(df, n_users=120):
+    rng = np.random.default_rng(42)
+    anchors = df[df["articleType"].isin(TOPS + DRESSES)]
+    if anchors.empty:
+        return pd.DataFrame()
+
+    records = []
+    for user in range(n_users):
+        for _ in range(10):
+            a = anchors.iloc[rng.integers(len(anchors))]
+            pool = df[
+                df["articleType"].isin(COMPLEMENT[a["articleType"]])
+                & (df["usage"] == a["usage"])
+            ]
+            if pool.empty:
+                continue
+            b = pool.iloc[rng.integers(len(pool))]
+            if colour_score(a["baseColour"], b["baseColour"]) >= 0.8:
+                records.append((user, a["id"]))
+                records.append((user, b["id"]))
+
+    if not records:
+        return pd.DataFrame()
+
+    interactions = pd.DataFrame(records, columns=["user_id", "item_id"]).drop_duplicates()
+    interactions["bought"] = 1
+
+    # user-item matrix, exactly like the practical's pivot_table
+    user_item = interactions.pivot_table(index="user_id", columns="item_id", values="bought").fillna(0)
+
+    # The practical used corrwith(), which returns NaN on sparse data.
+    # cosine_similarity on the same matrix is the same idea without the NaN.
+    item_sim = cosine_similarity(user_item.T)
+    return pd.DataFrame(item_sim, index=user_item.columns, columns=user_item.columns)
+
+
+def collaborative_recommendations(item_id, df, item_sim, k=5):
+    if item_sim.empty or item_id not in item_sim.index:
         return []
-    sims = item_sim_df[item_id].drop(index=item_id, errors='ignore')
-    a = df.set_index('id').loc[item_id]
-    art = df.set_index('id')['articleType']
-    keep = [iid for iid in sims.index if art.get(iid) in COMPLEMENT[a['articleType']]]
-    sims = sims.loc[keep]; sims = sims[sims > 0]
-    if sims.empty: return []
-    cand = df[df['id'].isin(sims.index)].copy()
-    cand['final'] = cand['id'].map(sims)
-    return diversify(cand, 'final', k)
 
-def hybrid_recommend(df, cos, item_sim_df, id_to_pos, item_id, k=5, w_content=0.5):
-    i = id_to_pos[item_id]; a = df.iloc[i]
-    cand = df[df['articleType'].isin(COMPLEMENT[a['articleType']])].copy()
-    cand = cand[cand['usage'] == a['usage']]
-    if cand.empty: return []
-    cand_idx = cand['id'].map(id_to_pos).values
-    style  = cos[i, cand_idx]
-    colour = cand['baseColour'].apply(lambda c: colour_score(a['baseColour'], c)).values
-    cand['content'] = 0.5*style + 0.5*colour
-    if not item_sim_df.empty and item_id in item_sim_df.index:
-        cand['collab'] = cand['id'].map(item_sim_df[item_id]).fillna(0).clip(lower=0)
+    scores = item_sim[item_id].drop(index=item_id, errors="ignore")
+    scores = scores[scores > 0]
+    if scores.empty:
+        return []
+
+    item = df[df["id"] == item_id].iloc[0]
+    candidates = df[
+        df["id"].isin(scores.index)
+        & df["articleType"].isin(COMPLEMENT[item["articleType"]])
+    ].copy()
+    if candidates.empty:
+        return []
+
+    candidates["score"] = candidates["id"].map(scores)
+    candidates = candidates.sort_values("score", ascending=False)
+    return balanced_top_k(candidates, k)
+
+
+# ---------------------------------------------------------------------------
+# Section 5 - Hybrid: average the content score and the collaborative score
+# ---------------------------------------------------------------------------
+def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, k=5):
+    idx = indices[item_id]
+    item = df.iloc[idx]
+
+    candidates = find_candidates(df, item)
+    if candidates.empty:
+        return []
+
+    positions = indices[candidates["id"]].values
+    style = cosine_sim[idx, positions]
+    colour = candidates["baseColour"].apply(lambda c: colour_score(item["baseColour"], c)).values
+    candidates["content"] = 0.5 * style + 0.5 * colour
+
+    if not item_sim.empty and item_id in item_sim.index:
+        candidates["collab"] = candidates["id"].map(item_sim[item_id]).fillna(0)
     else:
-        cand['collab'] = 0
-    for c in ['content','collab']:
-        rng = cand[c].max() - cand[c].min()
-        cand[c] = (cand[c]-cand[c].min())/rng if rng > 0 else 0
-    cand['final'] = w_content*cand['content'] + (1-w_content)*cand['collab']
-    return diversify(cand, 'final', k)
+        candidates["collab"] = 0.0
 
-def find_nearest_item(df, article_type, gender, usage, season, colour):
-    """Snap an uploaded photo's profile to the closest existing catalogue item,
-    so we have a real anchor id to run the recommenders on (handles the
-    cold-start case: a brand-new uploaded item has no history of its own)."""
-    cand = df[df['articleType'] == article_type]
-    gender_match = cand[cand['gender'].isin([gender, 'Unisex'])]
-    if not gender_match.empty:
-        cand = gender_match
-    if cand.empty:
-        return None
-    def score(row):
-        s = (1.0 if row['usage'] == usage else 0.0)
-        s += (1.0 if season_ok(row['season'], season) else 0.0)
-        s += colour_score(row['baseColour'], colour)
-        return s
-    cand = cand.copy()
-    cand['match'] = cand.apply(score, axis=1)
-    return cand.sort_values('match', ascending=False).iloc[0]['id']
+    for col in ["content", "collab"]:
+        spread = candidates[col].max() - candidates[col].min()
+        candidates[col] = (candidates[col] - candidates[col].min()) / spread if spread > 0 else 0
 
-# ----------------------------------------------------------------------------
-# UI
-# ----------------------------------------------------------------------------
-df, IMG_DIR, IS_SYNTH = load_catalog()
-id_to_pos = pd.Series(df.index, index=df['id'])
-cos, tfidf, item_sim_df = build_models(df)
+    candidates["score"] = 0.5 * candidates["content"] + 0.5 * candidates["collab"]
+    candidates = candidates.sort_values("score", ascending=False)
+    return balanced_top_k(candidates, k)
 
-st.title("👕 Outfit Recommender")
-st.caption(f"Catalogue: {len(df)} items \u00b7 {'synthetic demo data' if IS_SYNTH else 'real Kaggle data'}")
+
+# ---------------------------------------------------------------------------
+# Helper: detect the main colour of an uploaded photo
+# ---------------------------------------------------------------------------
+COLOUR_RGB = {
+    "Black": (20, 20, 20), "White": (245, 245, 245), "Grey": (150, 150, 150),
+    "Navy Blue": (30, 40, 80), "Blue": (50, 100, 190), "Red": (190, 40, 40),
+    "Maroon": (110, 30, 45), "Green": (50, 140, 80), "Yellow": (225, 200, 60),
+    "Beige": (220, 205, 175), "Brown": (110, 70, 40), "Pink": (230, 140, 170),
+    "Purple": (110, 60, 140), "Orange": (220, 120, 40), "Silver": (192, 192, 192),
+}
+
+
+def detect_colour(image, available):
+    pixels = np.array(image.convert("RGB").resize((50, 50))).reshape(-1, 3).mean(axis=0)
+    options = {c: rgb for c, rgb in COLOUR_RGB.items() if c in available}
+    if not options:
+        return available[0]
+    return min(options, key=lambda c: np.linalg.norm(np.array(options[c]) - pixels))
+
+
+# ---------------------------------------------------------------------------
+# User interface
+# ---------------------------------------------------------------------------
+st.title("Outfit Recommender")
+
+if not os.path.exists(CSV_PATH) or not os.path.isdir(IMG_DIR):
+    st.error(
+        "Product data not found.\n\n"
+        "This app needs the real Kaggle product photos. Add a folder named "
+        "`sample_data` to the repository containing `styles.csv` and an "
+        "`images` folder, then redeploy."
+    )
+    st.stop()
+
+df = load_data()
+if df.empty:
+    st.error("styles.csv loaded, but no rows had a matching image in sample_data/images.")
+    st.stop()
+
+cosine_sim = build_similarity(df)
+indices = pd.Series(df.index, index=df["id"])     # reverse map, like the practical
+item_sim = build_collaborative(df)
+
+st.caption(f"{len(df)} products loaded")
 
 left, right = st.columns([1, 2])
 
 with left:
-    st.subheader("1. Upload your item")
-    uploaded = st.file_uploader("Photo of a top, bottom, dress or shoe", type=['jpg','jpeg','png'])
-    detected_colour = None
+    st.subheader("1. Upload an item")
+    uploaded = st.file_uploader("Photo of a top, bottom, dress or shoe", type=["jpg", "jpeg", "png"])
+
+    detected = None
     if uploaded:
-        img = Image.open(uploaded)
-        st.image(img, caption="Your upload", use_container_width=True)
-        detected_colour = detect_dominant_colour(img, sorted(df['baseColour'].unique()))
-        st.success(f"Detected dominant colour: **{detected_colour}**")
+        photo = Image.open(uploaded)
+        st.image(photo, caption="Your upload", width='stretch')
+        detected = detect_colour(photo, sorted(df["baseColour"].unique()))
+        st.success(f"Detected colour: **{detected}**")
 
-    st.subheader("2. Confirm details")
-    group = st.selectbox("What type of item is this?", ["Top", "Bottom", "Dress", "Shoes"])
-    type_options = {"Top": TOPS, "Bottom": BOTTOMS, "Dress": DRESSES, "Shoes": SHOES}[group]
-    type_options = [t for t in type_options if t in df['articleType'].unique()] or type_options
-    article_type = st.selectbox("Specific type", type_options)
+    st.subheader("2. Confirm the details")
+    group = st.selectbox("Item type", ["Top", "Bottom", "Dress", "Shoes"])
+    options = {"Top": TOPS, "Bottom": BOTTOMS, "Dress": DRESSES, "Shoes": SHOES}[group]
+    options = [t for t in options if t in set(df["articleType"])] or options
+    article_type = st.selectbox("Specific type", options)
 
-    colour_list = sorted(df['baseColour'].unique())
-    default_idx = colour_list.index(detected_colour) if detected_colour in colour_list else 0
-    colour = st.selectbox("Colour (auto-filled from photo \u2014 override if wrong)", colour_list, index=default_idx)
+    colours = sorted(df["baseColour"].unique())
+    colour_index = colours.index(detected) if detected in colours else 0
+    colour = st.selectbox("Colour", colours, index=colour_index)
 
-    gender = st.selectbox("Gender", sorted(df['gender'].unique()))
-    usage  = st.selectbox("Style / occasion", sorted(df['usage'].unique()))
-    season = st.selectbox("Season", sorted(df['season'].unique()))
-    method = st.radio("Recommender method", ["Hybrid", "Content-based", "Collaborative"])
-    go = st.button("✨ Find matching outfit pieces", type="primary")
+    gender = st.selectbox("Gender", sorted(df["gender"].unique()))
+    usage = st.selectbox("Style / occasion", sorted(df["usage"].unique()))
+    season = st.selectbox("Season", sorted(df["season"].unique()))
+    method = st.radio("Method", ["Hybrid", "Content-based", "Collaborative"])
+    search = st.button("Find matching items", type="primary")
 
 with right:
-    st.subheader("Recommended outfit")
-    if go:
-        anchor_id = find_nearest_item(df, article_type, gender, usage, season, colour)
-        if anchor_id is None:
-            st.warning("No catalogue item matches that combination yet \u2014 try different filters.")
-        else:
-            if method == "Content-based":
-                rec_ids = complete_the_look(df, cos, id_to_pos, anchor_id, k=5)
-            elif method == "Collaborative":
-                rec_ids = collaborative_recommend(df, item_sim_df, anchor_id, k=5)
-            else:
-                rec_ids = hybrid_recommend(df, cos, item_sim_df, id_to_pos, anchor_id, k=5)
+    st.subheader("Recommended items")
 
-            if not rec_ids:
-                st.warning("No recommendations found for this combination with this method \u2014 try Hybrid or different filters.")
-            else:
-                name = df.set_index('id')['productDisplayName']
-                cols = st.columns(len(rec_ids))
-                for c, rid in zip(cols, rec_ids):
-                    p = f"{IMG_DIR}/{rid}.jpg"
-                    if os.path.exists(p):
-                        c.image(p, use_container_width=True)
-                    c.caption(name.get(rid, str(rid)))
-                st.caption(f"Method used: **{method}**")
+    if not search:
+        st.info("Fill in the details on the left, then click the button.")
     else:
-        st.info("Upload a photo and click the button to see recommendations here.")
+        # A newly uploaded photo is not in the catalogue, so we match it to the
+        # closest existing product and recommend from there.
+        pool = df[df["articleType"] == article_type]
+        matching_gender = pool[pool["gender"].isin([gender, "Unisex"])]
+        if not matching_gender.empty:
+            pool = matching_gender
+
+        if pool.empty:
+            st.warning("No products of that type in the sample. Try another type.")
+        else:
+            pool = pool.copy()
+            pool["match"] = (
+                (pool["usage"] == usage).astype(float)
+                + (pool["season"] == season).astype(float)
+                + pool["baseColour"].apply(lambda c: colour_score(colour, c))
+            )
+            anchor_id = pool.sort_values("match", ascending=False).iloc[0]["id"]
+
+            if method == "Content-based":
+                results = get_recommendations(anchor_id, df, cosine_sim, indices)
+            elif method == "Collaborative":
+                results = collaborative_recommendations(anchor_id, df, item_sim)
+            else:
+                results = hybrid_recommendations(anchor_id, df, cosine_sim, indices, item_sim)
+
+            if not results:
+                st.warning("No matches found with this method. Try Hybrid, or change the filters.")
+            else:
+                names = df.set_index("id")["productDisplayName"]
+                columns = st.columns(len(results))
+                for column, result_id in zip(columns, results):
+                    path = os.path.join(IMG_DIR, f"{result_id}.jpg")
+                    if os.path.exists(path):
+                        column.image(path, width='stretch')
+                    column.caption(names.get(result_id, str(result_id)))
+                st.caption(f"Method: **{method}**")
