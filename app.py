@@ -54,8 +54,43 @@ for d in DRESSES:
 for s in SHOES:
     COMPLEMENT[s] = TOPS + BOTTOMS + DRESSES
 
+# Which genders may be mixed. A women's top may be paired with women's or
+# unisex items, but never with menswear.
+GENDER_GROUPS = {
+    "Men": ["Men", "Unisex", "Boys"],
+    "Boys": ["Boys", "Men", "Unisex"],
+    "Women": ["Women", "Unisex", "Girls"],
+    "Girls": ["Girls", "Women", "Unisex"],
+    "Unisex": ["Unisex", "Men", "Women", "Boys", "Girls"],
+}
+
+# Which "slot" of an outfit each clothing type belongs to
+SLOT = {}
+for t in TOPS:
+    SLOT[t] = "top"
+for b in BOTTOMS:
+    SLOT[b] = "bottom"
+for d in DRESSES:
+    SLOT[d] = "dress"
+for s in SHOES:
+    SLOT[s] = "shoe"
+
+# What a sensible outfit looks like: if the user gives us a top, they want
+# mostly bottoms plus a couple of shoes - not five pairs of shoes.
+OUTFIT_QUOTA = {
+    "top": {"bottom": 3, "shoe": 2},
+    "bottom": {"top": 3, "shoe": 2},
+    "dress": {"shoe": 5},
+    "shoe": {"top": 2, "bottom": 2, "dress": 1},
+}
+
 # Simple colour-matching rule: neutrals go with anything
 NEUTRALS = {"Black", "White", "Grey", "Navy Blue", "Beige", "Brown", "Cream"}
+
+
+def season_ok(s1, s2):
+    """Seasons match if they are the same, or in the same warm/cold pair."""
+    return s1 == s2 or {"Fall", "Winter"} <= {s1, s2} or {"Spring", "Summer"} <= {s1, s2}
 
 
 def colour_score(c1, c2):
@@ -102,60 +137,75 @@ def build_similarity(df):
 # Same steps as the practical: get index -> score all items -> sort -> top K.
 # Added step: keep only COMPLEMENTARY categories, and add a colour score.
 # ---------------------------------------------------------------------------
-def find_candidates(df, item):
+def find_candidates(df, item, prefs):
     """Candidate items = complementary categories only.
 
-    We prefer a strict match (same occasion and gender), but if the product
-    sample is small that can leave nothing to recommend, so we relax the
-    filters step by step instead of returning an empty result.
+    The filters come from what the USER selected (prefs), not from whichever
+    catalogue item we matched them to. Gender is never dropped: relaxing it
+    is what previously caused menswear to be suggested for a women's top.
+    Occasion and season are relaxed only if too few items remain.
     """
     base = df[df["articleType"].isin(COMPLEMENT[item["articleType"]])]
 
-    strict = base[
-        (base["usage"] == item["usage"])
-        & (base["gender"].isin([item["gender"], "Unisex"]))
+    allowed_genders = GENDER_GROUPS.get(prefs["gender"], [prefs["gender"], "Unisex"])
+    gendered = base[base["gender"].isin(allowed_genders)]
+    if gendered.empty:
+        gendered = base          # only if the sample has nothing for this gender
+
+    strict = gendered[
+        (gendered["usage"] == prefs["usage"])
+        & (gendered["season"].apply(lambda s: season_ok(s, prefs["season"])))
     ]
-    if len(strict) >= 3:
+    if len(strict) >= 5:
         return strict.copy()
 
-    same_usage = base[base["usage"] == item["usage"]]
-    if len(same_usage) >= 3:
+    same_usage = gendered[gendered["usage"] == prefs["usage"]]
+    if len(same_usage) >= 5:
         return same_usage.copy()
 
-    return base.copy()
+    return gendered.copy()
 
 
-def get_recommendations(item_id, df, cosine_sim, indices, k=5):
+def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5):
     idx = indices[item_id]
     item = df.iloc[idx]
 
-    candidates = find_candidates(df, item)
+    candidates = find_candidates(df, item, prefs)
     if candidates.empty:
         return []
 
     positions = indices[candidates["id"]].values
     style = cosine_sim[idx, positions]
-    colour = candidates["baseColour"].apply(lambda c: colour_score(item["baseColour"], c)).values
+    # colour is compared against what the USER chose, not the matched item
+    colour = candidates["baseColour"].apply(lambda c: colour_score(prefs["colour"], c)).values
 
     candidates["score"] = 0.5 * style + 0.5 * colour
+    return balanced_top_k(candidates, item["articleType"], k)
+
+
+def balanced_top_k(candidates, query_type, k=5):
+    """Build a sensible outfit instead of just taking the top K scores.
+
+    For a top we want roughly 3 bottoms and 2 shoes. Taking the raw top K
+    lets one group (usually shoes) fill every slot.
+    """
+    candidates = candidates.copy()
+    candidates["slot"] = candidates["articleType"].map(SLOT)
     candidates = candidates.sort_values("score", ascending=False)
-    return balanced_top_k(candidates, k)
 
-
-def balanced_top_k(candidates, k=5):
-    """Take the best item from each clothing group first, then fill the rest.
-    Without this, one group (e.g. shoes) can fill all K slots."""
-    groups = [TOPS, BOTTOMS, DRESSES, SHOES]
+    quota = OUTFIT_QUOTA.get(SLOT.get(query_type), {})
     chosen = []
-    for types in groups:
-        sub = candidates[candidates["articleType"].isin(types)]
-        if not sub.empty:
-            chosen.append(sub.iloc[0]["id"])
+    for slot, count in quota.items():
+        picks = candidates[candidates["slot"] == slot]["id"].head(count).tolist()
+        chosen.extend(picks)
+
+    # if a slot had too few items, top up with the next best of anything
     for item_id in candidates["id"]:
         if len(chosen) >= k:
             break
         if item_id not in chosen:
             chosen.append(item_id)
+
     return chosen[:k]
 
 
@@ -202,7 +252,7 @@ def build_collaborative(df, n_users=120):
     return pd.DataFrame(item_sim, index=user_item.columns, columns=user_item.columns)
 
 
-def collaborative_recommendations(item_id, df, item_sim, k=5):
+def collaborative_recommendations(item_id, df, item_sim, prefs, k=5):
     if item_sim.empty or item_id not in item_sim.index:
         return []
 
@@ -212,32 +262,34 @@ def collaborative_recommendations(item_id, df, item_sim, k=5):
         return []
 
     item = df[df["id"] == item_id].iloc[0]
+    allowed_genders = GENDER_GROUPS.get(prefs["gender"], [prefs["gender"], "Unisex"])
+
     candidates = df[
         df["id"].isin(scores.index)
         & df["articleType"].isin(COMPLEMENT[item["articleType"]])
+        & df["gender"].isin(allowed_genders)
     ].copy()
     if candidates.empty:
         return []
 
     candidates["score"] = candidates["id"].map(scores)
-    candidates = candidates.sort_values("score", ascending=False)
-    return balanced_top_k(candidates, k)
+    return balanced_top_k(candidates, item["articleType"], k)
 
 
 # ---------------------------------------------------------------------------
 # Section 5 - Hybrid: average the content score and the collaborative score
 # ---------------------------------------------------------------------------
-def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, k=5):
+def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, prefs, k=5):
     idx = indices[item_id]
     item = df.iloc[idx]
 
-    candidates = find_candidates(df, item)
+    candidates = find_candidates(df, item, prefs)
     if candidates.empty:
         return []
 
     positions = indices[candidates["id"]].values
     style = cosine_sim[idx, positions]
-    colour = candidates["baseColour"].apply(lambda c: colour_score(item["baseColour"], c)).values
+    colour = candidates["baseColour"].apply(lambda c: colour_score(prefs["colour"], c)).values
     candidates["content"] = 0.5 * style + 0.5 * colour
 
     if not item_sim.empty and item_id in item_sim.index:
@@ -250,8 +302,7 @@ def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, k=5):
         candidates[col] = (candidates[col] - candidates[col].min()) / spread if spread > 0 else 0
 
     candidates["score"] = 0.5 * candidates["content"] + 0.5 * candidates["collab"]
-    candidates = candidates.sort_values("score", ascending=False)
-    return balanced_top_k(candidates, k)
+    return balanced_top_k(candidates, item["articleType"], k)
 
 
 # ---------------------------------------------------------------------------
@@ -267,11 +318,26 @@ COLOUR_RGB = {
 
 
 def detect_colour(image, available):
-    pixels = np.array(image.convert("RGB").resize((50, 50))).reshape(-1, 3).mean(axis=0)
-    options = {c: rgb for c, rgb in COLOUR_RGB.items() if c in available}
+    """Guess the item's colour from the photo.
+
+    We crop to the middle of the picture and take the median, because the
+    average over the whole photo is dominated by the background (a white top
+    on a beige table was being read as 'Beige').
+    """
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    box = (int(width * 0.25), int(height * 0.25), int(width * 0.75), int(height * 0.75))
+    crop = np.array(rgb.crop(box).resize((60, 60))).reshape(-1, 3)
+
+    # ignore very pale pixels (usually background), unless the item itself is pale
+    dark_enough = crop.sum(axis=1) < 690
+    pixels = crop[dark_enough] if dark_enough.sum() > len(crop) * 0.25 else crop
+    middle = np.median(pixels, axis=0)
+
+    options = {c: v for c, v in COLOUR_RGB.items() if c in available}
     if not options:
         return available[0]
-    return min(options, key=lambda c: np.linalg.norm(np.array(options[c]) - pixels))
+    return min(options, key=lambda c: np.linalg.norm(np.array(options[c]) - middle))
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +402,11 @@ with right:
     else:
         # A newly uploaded photo is not in the catalogue, so we match it to the
         # closest existing product and recommend from there.
+        prefs = {"gender": gender, "usage": usage, "season": season, "colour": colour}
+        allowed_genders = GENDER_GROUPS.get(gender, [gender, "Unisex"])
+
         pool = df[df["articleType"] == article_type]
-        matching_gender = pool[pool["gender"].isin([gender, "Unisex"])]
+        matching_gender = pool[pool["gender"].isin(allowed_genders)]
         if not matching_gender.empty:
             pool = matching_gender
 
@@ -347,17 +416,17 @@ with right:
             pool = pool.copy()
             pool["match"] = (
                 (pool["usage"] == usage).astype(float)
-                + (pool["season"] == season).astype(float)
+                + pool["season"].apply(lambda s: float(season_ok(s, season)))
                 + pool["baseColour"].apply(lambda c: colour_score(colour, c))
             )
             anchor_id = pool.sort_values("match", ascending=False).iloc[0]["id"]
 
             if method == "Content-based":
-                results = get_recommendations(anchor_id, df, cosine_sim, indices)
+                results = get_recommendations(anchor_id, df, cosine_sim, indices, prefs)
             elif method == "Collaborative":
-                results = collaborative_recommendations(anchor_id, df, item_sim)
+                results = collaborative_recommendations(anchor_id, df, item_sim, prefs)
             else:
-                results = hybrid_recommendations(anchor_id, df, cosine_sim, indices, item_sim)
+                results = hybrid_recommendations(anchor_id, df, cosine_sim, indices, item_sim, prefs)
 
             if not results:
                 st.warning("No matches found with this method. Try Hybrid, or change the filters.")
@@ -367,6 +436,8 @@ with right:
                 for column, result_id in zip(columns, results):
                     path = os.path.join(IMG_DIR, f"{result_id}.jpg")
                     if os.path.exists(path):
-                        column.image(path, width='stretch')
+                        # fixed width: the source photos are small, so stretching
+                        # them across the column makes them look blurry
+                        column.image(path, width=170)
                     column.caption(names.get(result_id, str(result_id)))
                 st.caption(f"Method: **{method}**")
