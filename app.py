@@ -84,8 +84,52 @@ OUTFIT_QUOTA = {
     "shoe": {"top": 2, "bottom": 2, "dress": 1},
 }
 
-# Simple colour-matching rule: neutrals go with anything
-NEUTRALS = {"Black", "White", "Grey", "Navy Blue", "Beige", "Brown", "Cream"}
+# ---------------------------------------------------------------------------
+# "Look" (dress style) - DERIVED, not a column in the dataset.
+#
+# The Kaggle data has no field for cultural or regional dress style, so we do
+# not invent one. Instead we derive a practical style label from two real
+# columns, `usage` and `articleType`. This is a rule we defined ourselves and
+# should be described in the report as a derived feature, not as ground truth.
+# ---------------------------------------------------------------------------
+LOOK_RULES = [
+    # (look name, allowed usages, allowed article types or None for any)
+    ("Sportswear / Gym", {"Sports"}, None),
+    ("Traditional / Ethnic", {"Ethnic"}, None),
+    ("Office / Formal", {"Formal"}, None),
+    ("Party / Going out", {"Party"}, None),
+    ("Loungewear / Home", {"Casual", "Home"},
+     {"Track Pants", "Shorts", "Leggings", "Sweatshirts", "Flats", "Sandals"}),
+    ("Smart Casual", {"Smart Casual", "Travel"}, None),
+    ("Everyday / Streetwear", {"Casual"}, None),
+]
+
+
+def derive_look(row):
+    """Assign one style label to an item using its usage and article type."""
+    for look, usages, articles in LOOK_RULES:
+        if row["usage"] in usages and (articles is None or row["articleType"] in articles):
+            return look
+    return "Everyday / Streetwear"
+
+
+# Colours that go with anything
+NEUTRALS = {
+    "Black", "White", "Off White", "Grey", "Grey Melange", "Charcoal",
+    "Navy Blue", "Beige", "Brown", "Coffee Brown", "Cream", "Silver",
+    "Khaki", "Taupe", "Tan", "Nude", "Steel", "Mushroom Brown",
+}
+
+# Position of each colour on the colour wheel (like hours on a clock).
+# Used to tell analogous colours (neighbours) from clashing ones.
+COLOUR_WHEEL = {
+    "Red": 0, "Maroon": 0, "Burgundy": 0, "Rust": 1, "Orange": 1, "Peach": 1,
+    "Copper": 1, "Bronze": 1, "Gold": 2, "Yellow": 2, "Mustard": 2,
+    "Lime Green": 3, "Fluorescent Green": 3, "Olive": 3,
+    "Green": 4, "Sea Green": 5, "Teal": 6, "Turquoise Blue": 6,
+    "Blue": 7, "Navy Blue": 7, "Lavender": 9, "Purple": 9, "Mauve": 9,
+    "Magenta": 10, "Pink": 11, "Rose": 11,
+}
 
 
 def season_ok(s1, s2):
@@ -94,12 +138,33 @@ def season_ok(s1, s2):
 
 
 def colour_score(c1, c2):
-    """1.0 = matches well, 0.8 = same colour, 0.3 = weak match."""
-    if c1 in NEUTRALS or c2 in NEUTRALS:
-        return 1.0
+    """How well two colours work together, from 0.2 (clash) to 0.95 (classic).
+
+    The earlier version returned 1.0 whenever either colour was neutral, which
+    made every candidate score the same, so colour stopped affecting the
+    ranking at all. This version gives a graded score instead.
+    """
+    n1, n2 = c1 in NEUTRALS, c2 in NEUTRALS
+
+    if n1 and n2:
+        return 0.95 if c1 != c2 else 0.85      # e.g. white + navy: classic
+    if n1 or n2:
+        return 0.85                            # a neutral with a colour: safe
     if c1 == c2:
-        return 0.8
-    return 0.3
+        return 0.60                            # all one colour can look flat
+
+    p1, p2 = COLOUR_WHEEL.get(c1), COLOUR_WHEEL.get(c2)
+    if p1 is None or p2 is None:
+        return 0.50                            # unknown colour: neither good nor bad
+
+    gap = min(abs(p1 - p2), 12 - abs(p1 - p2))  # distance around the wheel
+    if gap <= 1:
+        return 0.78                            # neighbours: harmonious
+    if gap == 2:
+        return 0.65
+    if gap >= 5:
+        return 0.72                            # opposites: deliberate contrast
+    return 0.30                                # awkward middle distance: clash
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +177,9 @@ def load_data():
     df = df[df["articleType"].isin(COMPLEMENT.keys())]
     df = df.dropna(subset=["gender", "articleType", "baseColour", "season", "usage"])
     df = df[df["id"].apply(lambda i: os.path.exists(os.path.join(IMG_DIR, f"{i}.jpg")))]
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    df["look"] = df.apply(derive_look, axis=1)      # derived style label
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +192,7 @@ def build_similarity(df):
     soup = (
         df["gender"] + " " + df["usage"] + " " + df["season"] + " "
         + df["baseColour"].str.replace(" ", "") + " " + df["articleType"]
+        + " " + df["look"].str.replace(r"[ /]", "", regex=True)
     )
     tfidf = TfidfVectorizer()
     tfidf_matrix = tfidf.fit_transform(soup)
@@ -152,18 +220,17 @@ def find_candidates(df, item, prefs):
     if gendered.empty:
         gendered = base          # only if the sample has nothing for this gender
 
-    strict = gendered[
-        (gendered["usage"] == prefs["usage"])
-        & (gendered["season"].apply(lambda s: season_ok(s, prefs["season"])))
-    ]
+    # Style ("look") is applied before occasion, because mixing gym wear with
+    # office wear looks worse than being one season out.
+    looked = gendered[gendered["look"] == prefs["look"]] if prefs.get("look") else gendered
+    if len(looked) < 5:
+        looked = gendered
+
+    strict = looked[looked["season"].apply(lambda s: season_ok(s, prefs["season"]))]
     if len(strict) >= 5:
         return strict.copy()
 
-    same_usage = gendered[gendered["usage"] == prefs["usage"]]
-    if len(same_usage) >= 5:
-        return same_usage.copy()
-
-    return gendered.copy()
+    return looked.copy()
 
 
 def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5):
@@ -216,19 +283,28 @@ def balanced_top_k(candidates, query_type, k=5):
 # (State this clearly as a limitation in the report.)
 # ---------------------------------------------------------------------------
 @st.cache_data
-def build_collaborative(df, n_users=120):
+def build_collaborative(df, n_users=None):
+    """Simulate shoppers who buy matching pairs together.
+
+    The number of simulated shoppers scales with the catalogue: with a large
+    catalogue and too few shoppers, most items are never bought, so
+    collaborative filtering has nothing to say about them and returns nothing.
+    """
     rng = np.random.default_rng(42)
     anchors = df[df["articleType"].isin(TOPS + DRESSES)]
     if anchors.empty:
         return pd.DataFrame()
 
+    if n_users is None:
+        n_users = max(150, len(df) // 2)     # enough coverage for the catalogue
+
     records = []
     for user in range(n_users):
-        for _ in range(10):
+        for _ in range(12):
             a = anchors.iloc[rng.integers(len(anchors))]
             pool = df[
                 df["articleType"].isin(COMPLEMENT[a["articleType"]])
-                & (df["usage"] == a["usage"])
+                & (df["look"] == a["look"])
             ]
             if pool.empty:
                 continue
@@ -269,6 +345,13 @@ def collaborative_recommendations(item_id, df, item_sim, prefs, k=5):
         & df["articleType"].isin(COMPLEMENT[item["articleType"]])
         & df["gender"].isin(allowed_genders)
     ].copy()
+
+    # keep the outfit in one style, same as the other two methods
+    if prefs.get("look"):
+        styled = candidates[candidates["look"] == prefs["look"]]
+        if len(styled) >= 3:
+            candidates = styled
+
     if candidates.empty:
         return []
 
@@ -389,7 +472,8 @@ with left:
     colour = st.selectbox("Colour", colours, index=colour_index)
 
     gender = st.selectbox("Gender", sorted(df["gender"].unique()))
-    usage = st.selectbox("Style / occasion", sorted(df["usage"].unique()))
+    usage = st.selectbox("Occasion", sorted(df["usage"].unique()))
+    look = st.selectbox("Dress style", sorted(df["look"].unique()))
     season = st.selectbox("Season", sorted(df["season"].unique()))
     method = st.radio("Method", ["Hybrid", "Content-based", "Collaborative"])
     search = st.button("Find matching items", type="primary")
@@ -402,7 +486,8 @@ with right:
     else:
         # A newly uploaded photo is not in the catalogue, so we match it to the
         # closest existing product and recommend from there.
-        prefs = {"gender": gender, "usage": usage, "season": season, "colour": colour}
+        prefs = {"gender": gender, "usage": usage, "season": season,
+                 "colour": colour, "look": look}
         allowed_genders = GENDER_GROUPS.get(gender, [gender, "Unisex"])
 
         pool = df[df["articleType"] == article_type]
@@ -415,9 +500,10 @@ with right:
         else:
             pool = pool.copy()
             pool["match"] = (
-                (pool["usage"] == usage).astype(float)
+                (pool["look"] == look).astype(float) * 2      # style matters most
+                + (pool["usage"] == usage).astype(float)
                 + pool["season"].apply(lambda s: float(season_ok(s, season)))
-                + pool["baseColour"].apply(lambda c: colour_score(colour, c))
+                + (pool["baseColour"] == colour).astype(float)
             )
             anchor_id = pool.sort_values("match", ascending=False).iloc[0]["id"]
 
