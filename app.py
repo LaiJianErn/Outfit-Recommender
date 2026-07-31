@@ -22,6 +22,9 @@ Exported from the Kaggle "Fashion Product Images (Small)" dataset.
 """
 
 import os
+import colorsys
+from collections import Counter
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -233,7 +236,7 @@ def find_candidates(df, item, prefs):
     return looked.copy()
 
 
-def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5):
+def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5, offset=0):
     idx = indices[item_id]
     item = df.iloc[idx]
 
@@ -247,10 +250,10 @@ def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5):
     colour = candidates["baseColour"].apply(lambda c: colour_score(prefs["colour"], c)).values
 
     candidates["score"] = 0.5 * style + 0.5 * colour
-    return balanced_top_k(candidates, item["articleType"], k)
+    return balanced_top_k(candidates, item["articleType"], k, offset)
 
 
-def balanced_top_k(candidates, query_type, k=5):
+def balanced_top_k(candidates, query_type, k=5, offset=0):
     """Build a sensible outfit instead of just taking the top K scores.
 
     For a top we want roughly 3 bottoms and 2 shoes. Taking the raw top K
@@ -263,7 +266,13 @@ def balanced_top_k(candidates, query_type, k=5):
     quota = OUTFIT_QUOTA.get(SLOT.get(query_type), {})
     chosen = []
     for slot, count in quota.items():
-        picks = candidates[candidates["slot"] == slot]["id"].head(count).tolist()
+        in_slot = candidates[candidates["slot"] == slot]["id"].tolist()
+        if not in_slot:
+            continue
+        # `offset` lets the user ask for another outfit: we step further down
+        # the ranked list instead of returning the same items again.
+        start = (offset * count) % len(in_slot)
+        picks = (in_slot + in_slot)[start:start + count]
         chosen.extend(picks)
 
     # if a slot had too few items, top up with the next best of anything
@@ -328,7 +337,7 @@ def build_collaborative(df, n_users=None):
     return pd.DataFrame(item_sim, index=user_item.columns, columns=user_item.columns)
 
 
-def collaborative_recommendations(item_id, df, item_sim, prefs, k=5):
+def collaborative_recommendations(item_id, df, item_sim, prefs, k=5, offset=0):
     if item_sim.empty or item_id not in item_sim.index:
         return []
 
@@ -356,13 +365,13 @@ def collaborative_recommendations(item_id, df, item_sim, prefs, k=5):
         return []
 
     candidates["score"] = candidates["id"].map(scores)
-    return balanced_top_k(candidates, item["articleType"], k)
+    return balanced_top_k(candidates, item["articleType"], k, offset)
 
 
 # ---------------------------------------------------------------------------
 # Section 5 - Hybrid: average the content score and the collaborative score
 # ---------------------------------------------------------------------------
-def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, prefs, k=5):
+def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, prefs, k=5, offset=0):
     idx = indices[item_id]
     item = df.iloc[idx]
 
@@ -385,42 +394,80 @@ def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, prefs, k=
         candidates[col] = (candidates[col] - candidates[col].min()) / spread if spread > 0 else 0
 
     candidates["score"] = 0.5 * candidates["content"] + 0.5 * candidates["collab"]
-    return balanced_top_k(candidates, item["articleType"], k)
+    return balanced_top_k(candidates, item["articleType"], k, offset)
 
 
 # ---------------------------------------------------------------------------
 # Helper: detect the main colour of an uploaded photo
 # ---------------------------------------------------------------------------
-COLOUR_RGB = {
-    "Black": (20, 20, 20), "White": (245, 245, 245), "Grey": (150, 150, 150),
-    "Navy Blue": (30, 40, 80), "Blue": (50, 100, 190), "Red": (190, 40, 40),
-    "Maroon": (110, 30, 45), "Green": (50, 140, 80), "Yellow": (225, 200, 60),
-    "Beige": (220, 205, 175), "Brown": (110, 70, 40), "Pink": (230, 140, 170),
-    "Purple": (110, 60, 140), "Orange": (220, 120, 40), "Silver": (192, 192, 192),
-}
+# Hue anchors around the colour wheel, used to name the colour in a photo.
+# Comparing raw RGB distance does not work: a pale pink is numerically closer
+# to Silver and Beige than to Pink, which is why light garments were being
+# misread. Hue survives lightness changes, so we classify on hue instead.
+HUE_NAMES = [
+    (0, "Red"), (20, "Orange"), (45, "Yellow"), (75, "Lime Green"),
+    (120, "Green"), (160, "Sea Green"), (180, "Teal"), (215, "Blue"),
+    (270, "Purple"), (300, "Magenta"), (330, "Pink"), (355, "Red"),
+]
+
+
+def classify_pixel(rgb):
+    """Name a single pixel's colour using hue, saturation and brightness."""
+    r, g, b = [x / 255.0 for x in rgb]
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    hue = h * 360
+
+    if s < 0.12:                                   # barely any colour: a neutral
+        if v < 0.18:
+            return "Black"
+        if v < 0.45:
+            return "Charcoal"
+        if v < 0.68:
+            return "Grey"
+        if v < 0.88:
+            return "Silver"
+        return "White"
+
+    name = min(HUE_NAMES, key=lambda x: min(abs(hue - x[0]), 360 - abs(hue - x[0])))[1]
+
+    if name == "Red":
+        if v < 0.45:
+            return "Maroon"
+        if s < 0.35 and v > 0.75:
+            return "Pink"                          # a pale tint of red is pink
+    if name == "Orange" and v < 0.5:
+        return "Brown"
+    if name == "Yellow" and s < 0.3:
+        return "Beige"
+    if name == "Blue" and v < 0.4:
+        return "Navy Blue"
+    if name == "Pink" and v < 0.5:
+        return "Maroon"
+    return name
 
 
 def detect_colour(image, available):
-    """Guess the item's colour from the photo.
+    """Guess the garment's colour from the photo.
 
-    We crop to the middle of the picture and take the median, because the
-    average over the whole photo is dominated by the background (a white top
-    on a beige table was being read as 'Beige').
+    Every pixel in the middle of the picture is named, then we take the most
+    common name. Plain white and silver are skipped first because they are
+    usually the background, not the item.
     """
     rgb = image.convert("RGB")
     width, height = rgb.size
-    box = (int(width * 0.25), int(height * 0.25), int(width * 0.75), int(height * 0.75))
-    crop = np.array(rgb.crop(box).resize((60, 60))).reshape(-1, 3)
+    box = (int(width * 0.2), int(height * 0.2), int(width * 0.8), int(height * 0.8))
+    pixels = np.array(rgb.crop(box).resize((80, 80))).reshape(-1, 3)
 
-    # ignore very pale pixels (usually background), unless the item itself is pale
-    dark_enough = crop.sum(axis=1) < 690
-    pixels = crop[dark_enough] if dark_enough.sum() > len(crop) * 0.25 else crop
-    middle = np.median(pixels, axis=0)
+    counts = Counter(classify_pixel(p) for p in pixels)
+    ranked = [name for name, _ in counts.most_common()]
 
-    options = {c: v for c, v in COLOUR_RGB.items() if c in available}
-    if not options:
-        return available[0]
-    return min(options, key=lambda c: np.linalg.norm(np.array(options[c]) - middle))
+    for name in ranked:                            # prefer an actual colour
+        if name not in ("White", "Silver") and name in available:
+            return name
+    for name in ranked:                            # otherwise whatever we have
+        if name in available:
+            return name
+    return available[0]
 
 
 # ---------------------------------------------------------------------------
@@ -471,12 +518,21 @@ with left:
     colour_index = colours.index(detected) if detected in colours else 0
     colour = st.selectbox("Colour", colours, index=colour_index)
 
-    gender = st.selectbox("Gender", sorted(df["gender"].unique()))
+    gender_options = sorted(df["gender"].unique())
+    default_gender = gender_options.index("Women") if "Women" in gender_options else 0
+    gender = st.selectbox(
+        "Gender", gender_options, index=default_gender,
+        help="Not read from the photo - please set this yourself.",
+    )
     usage = st.selectbox("Occasion", sorted(df["usage"].unique()))
     look = st.selectbox("Dress style", sorted(df["look"].unique()))
     season = st.selectbox("Season", sorted(df["season"].unique()))
     method = st.radio("Method", ["Hybrid", "Content-based", "Collaborative"])
     search = st.button("Find matching items", type="primary")
+    if st.button("Show me another option"):
+        st.session_state["variant"] = st.session_state.get("variant", 0) + 1
+        search = True
+    variant = st.session_state.get("variant", 0)
 
 with right:
     st.subheader("Recommended items")
@@ -508,11 +564,11 @@ with right:
             anchor_id = pool.sort_values("match", ascending=False).iloc[0]["id"]
 
             if method == "Content-based":
-                results = get_recommendations(anchor_id, df, cosine_sim, indices, prefs)
+                results = get_recommendations(anchor_id, df, cosine_sim, indices, prefs, offset=variant)
             elif method == "Collaborative":
-                results = collaborative_recommendations(anchor_id, df, item_sim, prefs)
+                results = collaborative_recommendations(anchor_id, df, item_sim, prefs, offset=variant)
             else:
-                results = hybrid_recommendations(anchor_id, df, cosine_sim, indices, item_sim, prefs)
+                results = hybrid_recommendations(anchor_id, df, cosine_sim, indices, item_sim, prefs, offset=variant)
 
             if not results:
                 st.warning("No matches found with this method. Try Hybrid, or change the filters.")
