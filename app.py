@@ -22,6 +22,9 @@ Exported from the Kaggle "Fashion Product Images (Small)" dataset.
 """
 
 import os
+import colorsys
+from collections import Counter
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -84,8 +87,52 @@ OUTFIT_QUOTA = {
     "shoe": {"top": 2, "bottom": 2, "dress": 1},
 }
 
-# Simple colour-matching rule: neutrals go with anything
-NEUTRALS = {"Black", "White", "Grey", "Navy Blue", "Beige", "Brown", "Cream"}
+# ---------------------------------------------------------------------------
+# "Look" (dress style) - DERIVED, not a column in the dataset.
+#
+# The Kaggle data has no field for cultural or regional dress style, so we do
+# not invent one. Instead we derive a practical style label from two real
+# columns, `usage` and `articleType`. This is a rule we defined ourselves and
+# should be described in the report as a derived feature, not as ground truth.
+# ---------------------------------------------------------------------------
+LOOK_RULES = [
+    # (look name, allowed usages, allowed article types or None for any)
+    ("Sportswear / Gym", {"Sports"}, None),
+    ("Traditional / Ethnic", {"Ethnic"}, None),
+    ("Office / Formal", {"Formal"}, None),
+    ("Party / Going out", {"Party"}, None),
+    ("Loungewear / Home", {"Casual", "Home"},
+     {"Track Pants", "Shorts", "Leggings", "Sweatshirts", "Flats", "Sandals"}),
+    ("Smart Casual", {"Smart Casual", "Travel"}, None),
+    ("Everyday / Streetwear", {"Casual"}, None),
+]
+
+
+def derive_look(row):
+    """Assign one style label to an item using its usage and article type."""
+    for look, usages, articles in LOOK_RULES:
+        if row["usage"] in usages and (articles is None or row["articleType"] in articles):
+            return look
+    return "Everyday / Streetwear"
+
+
+# Colours that go with anything
+NEUTRALS = {
+    "Black", "White", "Off White", "Grey", "Grey Melange", "Charcoal",
+    "Navy Blue", "Beige", "Brown", "Coffee Brown", "Cream", "Silver",
+    "Khaki", "Taupe", "Tan", "Nude", "Steel", "Mushroom Brown",
+}
+
+# Position of each colour on the colour wheel (like hours on a clock).
+# Used to tell analogous colours (neighbours) from clashing ones.
+COLOUR_WHEEL = {
+    "Red": 0, "Maroon": 0, "Burgundy": 0, "Rust": 1, "Orange": 1, "Peach": 1,
+    "Copper": 1, "Bronze": 1, "Gold": 2, "Yellow": 2, "Mustard": 2,
+    "Lime Green": 3, "Fluorescent Green": 3, "Olive": 3,
+    "Green": 4, "Sea Green": 5, "Teal": 6, "Turquoise Blue": 6,
+    "Blue": 7, "Navy Blue": 7, "Lavender": 9, "Purple": 9, "Mauve": 9,
+    "Magenta": 10, "Pink": 11, "Rose": 11,
+}
 
 
 def season_ok(s1, s2):
@@ -94,12 +141,33 @@ def season_ok(s1, s2):
 
 
 def colour_score(c1, c2):
-    """1.0 = matches well, 0.8 = same colour, 0.3 = weak match."""
-    if c1 in NEUTRALS or c2 in NEUTRALS:
-        return 1.0
+    """How well two colours work together, from 0.2 (clash) to 0.95 (classic).
+
+    The earlier version returned 1.0 whenever either colour was neutral, which
+    made every candidate score the same, so colour stopped affecting the
+    ranking at all. This version gives a graded score instead.
+    """
+    n1, n2 = c1 in NEUTRALS, c2 in NEUTRALS
+
+    if n1 and n2:
+        return 0.95 if c1 != c2 else 0.85      # e.g. white + navy: classic
+    if n1 or n2:
+        return 0.85                            # a neutral with a colour: safe
     if c1 == c2:
-        return 0.8
-    return 0.3
+        return 0.60                            # all one colour can look flat
+
+    p1, p2 = COLOUR_WHEEL.get(c1), COLOUR_WHEEL.get(c2)
+    if p1 is None or p2 is None:
+        return 0.50                            # unknown colour: neither good nor bad
+
+    gap = min(abs(p1 - p2), 12 - abs(p1 - p2))  # distance around the wheel
+    if gap <= 1:
+        return 0.78                            # neighbours: harmonious
+    if gap == 2:
+        return 0.65
+    if gap >= 5:
+        return 0.72                            # opposites: deliberate contrast
+    return 0.30                                # awkward middle distance: clash
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +180,9 @@ def load_data():
     df = df[df["articleType"].isin(COMPLEMENT.keys())]
     df = df.dropna(subset=["gender", "articleType", "baseColour", "season", "usage"])
     df = df[df["id"].apply(lambda i: os.path.exists(os.path.join(IMG_DIR, f"{i}.jpg")))]
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    df["look"] = df.apply(derive_look, axis=1)      # derived style label
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +195,7 @@ def build_similarity(df):
     soup = (
         df["gender"] + " " + df["usage"] + " " + df["season"] + " "
         + df["baseColour"].str.replace(" ", "") + " " + df["articleType"]
+        + " " + df["look"].str.replace(r"[ /]", "", regex=True)
     )
     tfidf = TfidfVectorizer()
     tfidf_matrix = tfidf.fit_transform(soup)
@@ -152,21 +223,20 @@ def find_candidates(df, item, prefs):
     if gendered.empty:
         gendered = base          # only if the sample has nothing for this gender
 
-    strict = gendered[
-        (gendered["usage"] == prefs["usage"])
-        & (gendered["season"].apply(lambda s: season_ok(s, prefs["season"])))
-    ]
+    # Style ("look") is applied before occasion, because mixing gym wear with
+    # office wear looks worse than being one season out.
+    looked = gendered[gendered["look"] == prefs["look"]] if prefs.get("look") else gendered
+    if len(looked) < 5:
+        looked = gendered
+
+    strict = looked[looked["season"].apply(lambda s: season_ok(s, prefs["season"]))]
     if len(strict) >= 5:
         return strict.copy()
 
-    same_usage = gendered[gendered["usage"] == prefs["usage"]]
-    if len(same_usage) >= 5:
-        return same_usage.copy()
-
-    return gendered.copy()
+    return looked.copy()
 
 
-def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5):
+def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5, offset=0):
     idx = indices[item_id]
     item = df.iloc[idx]
 
@@ -180,10 +250,10 @@ def get_recommendations(item_id, df, cosine_sim, indices, prefs, k=5):
     colour = candidates["baseColour"].apply(lambda c: colour_score(prefs["colour"], c)).values
 
     candidates["score"] = 0.5 * style + 0.5 * colour
-    return balanced_top_k(candidates, item["articleType"], k)
+    return balanced_top_k(candidates, item["articleType"], k, offset)
 
 
-def balanced_top_k(candidates, query_type, k=5):
+def balanced_top_k(candidates, query_type, k=5, offset=0):
     """Build a sensible outfit instead of just taking the top K scores.
 
     For a top we want roughly 3 bottoms and 2 shoes. Taking the raw top K
@@ -196,7 +266,13 @@ def balanced_top_k(candidates, query_type, k=5):
     quota = OUTFIT_QUOTA.get(SLOT.get(query_type), {})
     chosen = []
     for slot, count in quota.items():
-        picks = candidates[candidates["slot"] == slot]["id"].head(count).tolist()
+        in_slot = candidates[candidates["slot"] == slot]["id"].tolist()
+        if not in_slot:
+            continue
+        # `offset` lets the user ask for another outfit: we step further down
+        # the ranked list instead of returning the same items again.
+        start = (offset * count) % len(in_slot)
+        picks = (in_slot + in_slot)[start:start + count]
         chosen.extend(picks)
 
     # if a slot had too few items, top up with the next best of anything
@@ -216,19 +292,28 @@ def balanced_top_k(candidates, query_type, k=5):
 # (State this clearly as a limitation in the report.)
 # ---------------------------------------------------------------------------
 @st.cache_data
-def build_collaborative(df, n_users=120):
+def build_collaborative(df, n_users=None):
+    """Simulate shoppers who buy matching pairs together.
+
+    The number of simulated shoppers scales with the catalogue: with a large
+    catalogue and too few shoppers, most items are never bought, so
+    collaborative filtering has nothing to say about them and returns nothing.
+    """
     rng = np.random.default_rng(42)
     anchors = df[df["articleType"].isin(TOPS + DRESSES)]
     if anchors.empty:
         return pd.DataFrame()
 
+    if n_users is None:
+        n_users = max(150, len(df) // 2)     # enough coverage for the catalogue
+
     records = []
     for user in range(n_users):
-        for _ in range(10):
+        for _ in range(12):
             a = anchors.iloc[rng.integers(len(anchors))]
             pool = df[
                 df["articleType"].isin(COMPLEMENT[a["articleType"]])
-                & (df["usage"] == a["usage"])
+                & (df["look"] == a["look"])
             ]
             if pool.empty:
                 continue
@@ -252,7 +337,7 @@ def build_collaborative(df, n_users=120):
     return pd.DataFrame(item_sim, index=user_item.columns, columns=user_item.columns)
 
 
-def collaborative_recommendations(item_id, df, item_sim, prefs, k=5):
+def collaborative_recommendations(item_id, df, item_sim, prefs, k=5, offset=0):
     if item_sim.empty or item_id not in item_sim.index:
         return []
 
@@ -269,17 +354,24 @@ def collaborative_recommendations(item_id, df, item_sim, prefs, k=5):
         & df["articleType"].isin(COMPLEMENT[item["articleType"]])
         & df["gender"].isin(allowed_genders)
     ].copy()
+
+    # keep the outfit in one style, same as the other two methods
+    if prefs.get("look"):
+        styled = candidates[candidates["look"] == prefs["look"]]
+        if len(styled) >= 3:
+            candidates = styled
+
     if candidates.empty:
         return []
 
     candidates["score"] = candidates["id"].map(scores)
-    return balanced_top_k(candidates, item["articleType"], k)
+    return balanced_top_k(candidates, item["articleType"], k, offset)
 
 
 # ---------------------------------------------------------------------------
 # Section 5 - Hybrid: average the content score and the collaborative score
 # ---------------------------------------------------------------------------
-def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, prefs, k=5):
+def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, prefs, k=5, offset=0):
     idx = indices[item_id]
     item = df.iloc[idx]
 
@@ -302,48 +394,153 @@ def hybrid_recommendations(item_id, df, cosine_sim, indices, item_sim, prefs, k=
         candidates[col] = (candidates[col] - candidates[col].min()) / spread if spread > 0 else 0
 
     candidates["score"] = 0.5 * candidates["content"] + 0.5 * candidates["collab"]
-    return balanced_top_k(candidates, item["articleType"], k)
+    return balanced_top_k(candidates, item["articleType"], k, offset)
 
 
 # ---------------------------------------------------------------------------
 # Helper: detect the main colour of an uploaded photo
 # ---------------------------------------------------------------------------
-COLOUR_RGB = {
-    "Black": (20, 20, 20), "White": (245, 245, 245), "Grey": (150, 150, 150),
-    "Navy Blue": (30, 40, 80), "Blue": (50, 100, 190), "Red": (190, 40, 40),
-    "Maroon": (110, 30, 45), "Green": (50, 140, 80), "Yellow": (225, 200, 60),
-    "Beige": (220, 205, 175), "Brown": (110, 70, 40), "Pink": (230, 140, 170),
-    "Purple": (110, 60, 140), "Orange": (220, 120, 40), "Silver": (192, 192, 192),
-}
+# Hue anchors around the colour wheel, used to name the colour in a photo.
+# Comparing raw RGB distance does not work: a pale pink is numerically closer
+# to Silver and Beige than to Pink, which is why light garments were being
+# misread. Hue survives lightness changes, so we classify on hue instead.
+HUE_NAMES = [
+    (0, "Red"), (20, "Orange"), (45, "Yellow"), (75, "Lime Green"),
+    (120, "Green"), (160, "Sea Green"), (180, "Teal"), (215, "Blue"),
+    (270, "Purple"), (300, "Magenta"), (330, "Pink"), (355, "Red"),
+]
+
+
+def classify_pixel(rgb):
+    """Name a single pixel's colour using hue, saturation and brightness."""
+    r, g, b = [x / 255.0 for x in rgb]
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    hue = h * 360
+
+    if s < 0.12:                                   # barely any colour: a neutral
+        if v < 0.18:
+            return "Black"
+        if v < 0.45:
+            return "Charcoal"
+        if v < 0.68:
+            return "Grey"
+        if v < 0.88:
+            return "Silver"
+        return "White"
+
+    name = min(HUE_NAMES, key=lambda x: min(abs(hue - x[0]), 360 - abs(hue - x[0])))[1]
+
+    if name == "Red":
+        if v < 0.45:
+            return "Maroon"
+        if s < 0.35 and v > 0.75:
+            return "Pink"                          # a pale tint of red is pink
+    if name == "Orange" and v < 0.5:
+        return "Brown"
+    if name == "Yellow" and s < 0.3:
+        return "Beige"
+    if name == "Blue" and v < 0.4:
+        return "Navy Blue"
+    if name == "Pink" and v < 0.5:
+        return "Maroon"
+    return name
 
 
 def detect_colour(image, available):
-    """Guess the item's colour from the photo.
+    """Guess the garment's colour from the photo.
 
-    We crop to the middle of the picture and take the median, because the
-    average over the whole photo is dominated by the background (a white top
-    on a beige table was being read as 'Beige').
+    Every pixel in the middle of the picture is named, then we take the most
+    common name. Plain white and silver are skipped first because they are
+    usually the background, not the item.
     """
     rgb = image.convert("RGB")
     width, height = rgb.size
-    box = (int(width * 0.25), int(height * 0.25), int(width * 0.75), int(height * 0.75))
-    crop = np.array(rgb.crop(box).resize((60, 60))).reshape(-1, 3)
+    box = (int(width * 0.2), int(height * 0.2), int(width * 0.8), int(height * 0.8))
+    pixels = np.array(rgb.crop(box).resize((80, 80))).reshape(-1, 3)
 
-    # ignore very pale pixels (usually background), unless the item itself is pale
-    dark_enough = crop.sum(axis=1) < 690
-    pixels = crop[dark_enough] if dark_enough.sum() > len(crop) * 0.25 else crop
-    middle = np.median(pixels, axis=0)
+    counts = Counter(classify_pixel(p) for p in pixels)
+    ranked = [name for name, _ in counts.most_common()]
 
-    options = {c: v for c, v in COLOUR_RGB.items() if c in available}
-    if not options:
-        return available[0]
-    return min(options, key=lambda c: np.linalg.norm(np.array(options[c]) - middle))
+    for name in ranked:                            # prefer an actual colour
+        if name not in ("White", "Silver") and name in available:
+            return name
+    for name in ranked:                            # otherwise whatever we have
+        if name in available:
+            return name
+    return available[0]
 
 
 # ---------------------------------------------------------------------------
 # User interface
 # ---------------------------------------------------------------------------
-st.title("Outfit Recommender")
+# ---------------------------------------------------------------------------
+# Styling. Ink-blue and warm sand, set in Fraunces (a high-contrast display
+# face used only for the wordmark) over Inter for everything else. The rule
+# under each method name is the structural device: it separates the three
+# recommenders without adding boxes.
+# ---------------------------------------------------------------------------
+st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  .stApp { background: #FBF9F5; }
+  html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: #1C2B3A; }
+
+  .wordmark {
+      font-family: 'Fraunces', serif; font-size: 2.6rem; font-weight: 600;
+      color: #1C2B3A; letter-spacing: -0.02em; line-height: 1.05; margin: 0;
+  }
+  .tagline {
+      font-size: 0.9rem; color: #7A8794; margin: 0.3rem 0 0.2rem 0;
+      letter-spacing: 0.01em;
+  }
+  .count { font-size: 0.78rem; color: #A2ADB8; letter-spacing: 0.06em;
+           text-transform: uppercase; }
+
+  .step {
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.14em;
+      text-transform: uppercase; color: #C08552; margin: 0.4rem 0 0.1rem 0;
+  }
+
+  .method-head { margin: 1.6rem 0 0.9rem 0; }
+  .method-name {
+      font-family: 'Fraunces', serif; font-size: 1.35rem; color: #1C2B3A;
+      margin-right: 0.7rem;
+  }
+  .method-blurb { font-size: 0.85rem; color: #7A8794; }
+
+  .item-name {
+      font-size: 0.8rem; font-weight: 500; color: #1C2B3A; line-height: 1.3;
+      margin-top: 0.45rem;
+  }
+  .item-meta { font-size: 0.72rem; color: #A2ADB8; margin-top: 0.1rem; }
+
+  .divider { height: 1px; background: #E8E2D8; margin: 1.5rem 0 0.2rem 0; }
+
+  .placeholder {
+      border: 1px dashed #DDD5C8; border-radius: 4px; padding: 2.5rem 2rem;
+      color: #7A8794; font-size: 0.92rem; line-height: 1.6; text-align: center;
+      margin-top: 1rem;
+  }
+
+  div.stButton > button[kind="primary"] {
+      background: #1C2B3A; color: #FBF9F5; border: none; border-radius: 3px;
+      font-weight: 500; letter-spacing: 0.02em;
+  }
+  div.stButton > button[kind="primary"]:hover { background: #2E4257; }
+  div.stButton > button[kind="secondary"] {
+      background: transparent; color: #1C2B3A; border: 1px solid #DDD5C8;
+      border-radius: 3px; font-weight: 500;
+  }
+  img { border-radius: 3px; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("<div class='wordmark'>Outfit Recommender</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div class='tagline'>Upload a piece you own. Three recommender methods "
+    "each suggest what completes the look.</div>",
+    unsafe_allow_html=True,
+)
 
 if not os.path.exists(CSV_PATH) or not os.path.isdir(IMG_DIR):
     st.error(
@@ -359,16 +556,42 @@ if df.empty:
     st.error("styles.csv loaded, but no rows had a matching image in sample_data/images.")
     st.stop()
 
+@st.cache_data
+def image_display_width(ids):
+    """Pick a display size that suits the photos we actually have.
+
+    Small source photos are shown smaller so they stay sharp; larger photos are
+    shown bigger. This means swapping in the high-resolution dataset improves
+    the display automatically, with no code change.
+    """
+    widths = []
+    for i in list(ids)[:25]:
+        path = os.path.join(IMG_DIR, f"{i}.jpg")
+        if os.path.exists(path):
+            with Image.open(path) as im:
+                widths.append(im.size[0])
+    if not widths:
+        return 140
+    typical = sorted(widths)[len(widths) // 2]
+    return int(min(180, max(110, typical * 2)))
+
+
+DISPLAY_WIDTH = image_display_width(df["id"].tolist())
+
 cosine_sim = build_similarity(df)
 indices = pd.Series(df.index, index=df["id"])     # reverse map, like the practical
 item_sim = build_collaborative(df)
 
-st.caption(f"{len(df)} products loaded")
+_res = "low-res" if DISPLAY_WIDTH < 150 else "high-res"
+st.markdown(
+    f"<div class='count'>{len(df)} products in catalogue &middot; {_res} images</div>",
+    unsafe_allow_html=True,
+)
 
 left, right = st.columns([1, 2])
 
 with left:
-    st.subheader("1. Upload an item")
+    st.markdown("<div class='step'>Step 1 &mdash; Your item</div>", unsafe_allow_html=True)
     uploaded = st.file_uploader("Photo of a top, bottom, dress or shoe", type=["jpg", "jpeg", "png"])
 
     detected = None
@@ -378,7 +601,7 @@ with left:
         detected = detect_colour(photo, sorted(df["baseColour"].unique()))
         st.success(f"Detected colour: **{detected}**")
 
-    st.subheader("2. Confirm the details")
+    st.markdown("<div class='step'>Step 2 &mdash; Confirm details</div>", unsafe_allow_html=True)
     group = st.selectbox("Item type", ["Top", "Bottom", "Dress", "Shoes"])
     options = {"Top": TOPS, "Bottom": BOTTOMS, "Dress": DRESSES, "Shoes": SHOES}[group]
     options = [t for t in options if t in set(df["articleType"])] or options
@@ -388,21 +611,34 @@ with left:
     colour_index = colours.index(detected) if detected in colours else 0
     colour = st.selectbox("Colour", colours, index=colour_index)
 
-    gender = st.selectbox("Gender", sorted(df["gender"].unique()))
-    usage = st.selectbox("Style / occasion", sorted(df["usage"].unique()))
+    gender_options = sorted(df["gender"].unique())
+    default_gender = gender_options.index("Women") if "Women" in gender_options else 0
+    gender = st.selectbox(
+        "Gender", gender_options, index=default_gender,
+        help="Not read from the photo - please set this yourself.",
+    )
+    usage = st.selectbox("Occasion", sorted(df["usage"].unique()))
+    look = st.selectbox("Dress style", sorted(df["look"].unique()))
     season = st.selectbox("Season", sorted(df["season"].unique()))
-    method = st.radio("Method", ["Hybrid", "Content-based", "Collaborative"])
-    search = st.button("Find matching items", type="primary")
+    search = st.button("Find matching outfits", type="primary")
+    if st.button("Show me another option"):
+        st.session_state["variant"] = st.session_state.get("variant", 0) + 1
+        search = True
+    variant = st.session_state.get("variant", 0)
 
 with right:
-    st.subheader("Recommended items")
-
     if not search:
-        st.info("Fill in the details on the left, then click the button.")
+        st.markdown(
+            "<div class='placeholder'>Set the details on the left, then press "
+            "<b>Find matching outfits</b>.<br>All three recommender methods will "
+            "be shown side by side for comparison.</div>",
+            unsafe_allow_html=True,
+        )
     else:
         # A newly uploaded photo is not in the catalogue, so we match it to the
         # closest existing product and recommend from there.
-        prefs = {"gender": gender, "usage": usage, "season": season, "colour": colour}
+        prefs = {"gender": gender, "usage": usage, "season": season,
+                 "colour": colour, "look": look}
         allowed_genders = GENDER_GROUPS.get(gender, [gender, "Unisex"])
 
         pool = df[df["articleType"] == article_type]
@@ -415,29 +651,50 @@ with right:
         else:
             pool = pool.copy()
             pool["match"] = (
-                (pool["usage"] == usage).astype(float)
+                (pool["look"] == look).astype(float) * 2      # style matters most
+                + (pool["usage"] == usage).astype(float)
                 + pool["season"].apply(lambda s: float(season_ok(s, season)))
-                + pool["baseColour"].apply(lambda c: colour_score(colour, c))
+                + (pool["baseColour"] == colour).astype(float)
             )
             anchor_id = pool.sort_values("match", ascending=False).iloc[0]["id"]
 
-            if method == "Content-based":
-                results = get_recommendations(anchor_id, df, cosine_sim, indices, prefs)
-            elif method == "Collaborative":
-                results = collaborative_recommendations(anchor_id, df, item_sim, prefs)
-            else:
-                results = hybrid_recommendations(anchor_id, df, cosine_sim, indices, item_sim, prefs)
+            names = df.set_index("id")["productDisplayName"]
+            colours = df.set_index("id")["baseColour"]
+            types = df.set_index("id")["articleType"]
 
-            if not results:
-                st.warning("No matches found with this method. Try Hybrid, or change the filters.")
-            else:
-                names = df.set_index("id")["productDisplayName"]
-                columns = st.columns(len(results))
+            methods = [
+                ("Content-based", "Item attributes: colour, style, season",
+                 lambda: get_recommendations(anchor_id, df, cosine_sim, indices,
+                                             prefs, offset=variant)),
+                ("Collaborative", "What similar shoppers bought together",
+                 lambda: collaborative_recommendations(anchor_id, df, item_sim,
+                                                       prefs, offset=variant)),
+                ("Hybrid", "Both signals combined, 50/50",
+                 lambda: hybrid_recommendations(anchor_id, df, cosine_sim, indices,
+                                                item_sim, prefs, offset=variant)),
+            ]
+
+            for name, blurb, fn in methods:
+                results = fn()
+                st.markdown(
+                    f"<div class='method-head'><span class='method-name'>{name}</span>"
+                    f"<span class='method-blurb'>{blurb}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                if not results:
+                    st.warning("No matches with this method. Try different filters.")
+                    continue
+
+                columns = st.columns(5)
                 for column, result_id in zip(columns, results):
                     path = os.path.join(IMG_DIR, f"{result_id}.jpg")
-                    if os.path.exists(path):
-                        # fixed width: the source photos are small, so stretching
-                        # them across the column makes them look blurry
-                        column.image(path, width=170)
-                    column.caption(names.get(result_id, str(result_id)))
-                st.caption(f"Method: **{method}**")
+                    with column:
+                        if os.path.exists(path):
+                            st.image(path, width=DISPLAY_WIDTH)
+                        st.markdown(
+                            f"<div class='item-name'>{names.get(result_id, result_id)}</div>"
+                            f"<div class='item-meta'>{types.get(result_id, '')} &middot; "
+                            f"{colours.get(result_id, '')}</div>",
+                            unsafe_allow_html=True,
+                        )
+                st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
