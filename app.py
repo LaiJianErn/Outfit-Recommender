@@ -480,64 +480,67 @@ def detect_colour(image, available):
 # recommenders without adding boxes.
 # ---------------------------------------------------------------------------
 st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  /* Pull the page up: Streamlit leaves a large gap above the first element */
-  .block-container { padding-top: 2.2rem !important; padding-bottom: 3rem; max-width: 1500px; }
-  header[data-testid="stHeader"] { background: transparent; height: 0; }
+  .stApp { background: #FBF9F5; }
+  html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: #1C2B3A; }
 
-  /* Bone background with a faint warm wash, so it is not flat white */
-  .stApp {
-      background:
-        radial-gradient(1100px 500px at 12% -8%, #FFFFFF 0%, rgba(255,255,255,0) 62%),
-        linear-gradient(178deg, #FAF7F2 0%, #F3EEE5 100%);
-      background-attachment: fixed;
-  }
-  html, body, .stApp, .stMarkdown, p, span, label, div[data-baseweb] {
-      font-family: 'Inter', sans-serif; color: #12212E;
-  }
-
-  .rule-top { height: 2px; width: 46px; background: #B07D4F; margin-bottom: 1.05rem; }
   .wordmark {
-      font-family: 'Fraunces', serif; font-size: 3.05rem; font-weight: 600;
-      color: #12212E; letter-spacing: -0.028em; line-height: 1; margin: 0;
+      font-family: 'Fraunces', serif; font-size: 2.6rem; font-weight: 600;
+      color: #1C2B3A; letter-spacing: -0.02em; line-height: 1.05; margin: 0;
   }
-  .tagline { font-size: 0.95rem; color: #63707E; margin: 0.55rem 0 0 0; max-width: 46ch; }
-  .count {
-      font-size: 0.7rem; color: #93A0AC; letter-spacing: 0.16em;
-      text-transform: uppercase; margin-top: 0.75rem;
+  .tagline {
+      font-size: 0.9rem; color: #7A8794; margin: 0.3rem 0 0.2rem 0;
+      letter-spacing: 0.01em;
   }
-  .hairline { height: 1px; background: #E2DACD; margin: 1.5rem 0 0.4rem 0; }
+  .count { font-size: 0.78rem; color: #A2ADB8; letter-spacing: 0.06em;
+           text-transform: uppercase; }
 
   .step {
-      font-size: 0.68rem; font-weight: 600; letter-spacing: 0.17em;
-      text-transform: uppercase; color: #B07D4F; margin: 1.1rem 0 0.5rem 0;
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.14em;
+      text-transform: uppercase; color: #C08552; margin: 0.4rem 0 0.1rem 0;
   }
+
+  .method-head { margin: 1.6rem 0 0.9rem 0; }
+  .method-name {
+      font-family: 'Fraunces', serif; font-size: 1.35rem; color: #1C2B3A;
+      margin-right: 0.7rem;
+  }
+  .method-blurb { font-size: 0.85rem; color: #7A8794; }
+
+  .item-name {
+      font-size: 0.8rem; font-weight: 500; color: #1C2B3A; line-height: 1.3;
+      margin-top: 0.45rem;
+  }
+  .item-meta { font-size: 0.72rem; color: #A2ADB8; margin-top: 0.1rem; }
+
+  .divider { height: 1px; background: #E8E2D8; margin: 1.5rem 0 0.2rem 0; }
 
   .placeholder {
-      border: 1px dashed #D8CDBC; border-radius: 6px; padding: 3.2rem 2rem;
-      color: #63707E; font-size: 0.93rem; line-height: 1.65; text-align: center;
-      background: rgba(255,255,255,0.5); margin-top: 0.6rem;
+      border: 1px dashed #DDD5C8; border-radius: 4px; padding: 2.5rem 2rem;
+      color: #7A8794; font-size: 0.92rem; line-height: 1.6; text-align: center;
+      margin-top: 1rem;
   }
 
-  /* Product cards */
-  div[data-testid="stImage"] { background: #FFFFFF; border-radius: 6px; padding: 0.5rem 0.4rem; }
-  div[data-testid="stImage"] img { border-radius: 3px; mix-blend-mode: multiply; }
-
-  /* Controls */
   div.stButton > button[kind="primary"] {
-      background: #12212E; color: #FAF7F2; border: none; border-radius: 4px;
-      font-weight: 500; letter-spacing: 0.03em; padding: 0.55rem 1rem;
-      box-shadow: 0 1px 2px rgba(18,33,46,0.16);
+      background: #1C2B3A; color: #FBF9F5; border: none; border-radius: 3px;
+      font-weight: 500; letter-spacing: 0.02em;
   }
-  div.stButton > button[kind="primary"]:hover { background: #24394C; color: #FFFFFF; }
+  div.stButton > button[kind="primary"]:hover { background: #2E4257; }
   div.stButton > button[kind="secondary"] {
-      background: transparent; color: #12212E; border: 1px solid #D8CDBC;
-      border-radius: 4px; font-weight: 500;
+      background: transparent; color: #1C2B3A; border: 1px solid #DDD5C8;
+      border-radius: 3px; font-weight: 500;
   }
-  div.stButton > button[kind="secondary"]:hover { border-color: #B07D4F; color: #B07D4F; }
+  img { border-radius: 3px; }
 </style>
 """, unsafe_allow_html=True)
+
+st.markdown("<div class='wordmark'>Outfit Recommender</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div class='tagline'>Upload a piece you own. Three recommender methods "
+    "each suggest what completes the look.</div>",
+    unsafe_allow_html=True,
+)
 
 if not os.path.exists(CSV_PATH) or not os.path.isdir(IMG_DIR):
     st.error(
@@ -579,19 +582,11 @@ cosine_sim = build_similarity(df)
 indices = pd.Series(df.index, index=df["id"])     # reverse map, like the practical
 item_sim = build_collaborative(df)
 
-st.markdown("<div class='rule-top'></div>", unsafe_allow_html=True)
-st.markdown("<div class='wordmark'>Outfit Recommender</div>", unsafe_allow_html=True)
-st.markdown(
-    "<div class='tagline'>Upload a piece you own. Three recommender methods each "
-    "suggest what completes the look.</div>",
-    unsafe_allow_html=True,
-)
 _res = "low-res" if DISPLAY_WIDTH < 150 else "high-res"
 st.markdown(
-    f"<div class='count'>{len(df)} products &nbsp;&middot;&nbsp; {_res} images</div>",
+    f"<div class='count'>{len(df)} products in catalogue &middot; {_res} images</div>",
     unsafe_allow_html=True,
 )
-st.markdown("<div class='hairline'></div>", unsafe_allow_html=True)
 
 left, right = st.columns([1, 2])
 
@@ -679,27 +674,13 @@ with right:
                                                 item_sim, prefs, offset=variant)),
             ]
 
-            for number, (name, blurb, fn) in enumerate(methods, 1):
+            for name, blurb, fn in methods:
                 results = fn()
-
-                # Inline styles here on purpose: class-based CSS can be overridden
-                # by Streamlit's own theme, which made these labels invisible in
-                # dark mode. Inline styles always win.
                 st.markdown(
-                    "<div style=\"display:flex;align-items:baseline;gap:0.7rem;"
-                    "margin:1.9rem 0 0.2rem 0;\">"
-                    "<span style=\"font-family:'Fraunces',serif;font-size:0.9rem;"
-                    "font-weight:600;color:#B07D4F;letter-spacing:0.05em;\">"
-                    f"{number:02d}</span>"
-                    "<span style=\"font-family:'Fraunces',serif;font-size:1.45rem;"
-                    f"font-weight:600;color:#12212E;letter-spacing:-0.01em;\">{name}</span>"
-                    "<span style=\"font-family:'Inter',sans-serif;font-size:0.84rem;"
-                    f"color:#63707E;\">{blurb}</span>"
-                    "</div>"
-                    "<div style=\"height:1px;background:#E2DACD;margin-bottom:1.05rem;\"></div>",
+                    f"<div class='method-head'><span class='method-name'>{name}</span>"
+                    f"<span class='method-blurb'>{blurb}</span></div>",
                     unsafe_allow_html=True,
                 )
-
                 if not results:
                     st.warning("No matches with this method. Try different filters.")
                     continue
@@ -711,11 +692,9 @@ with right:
                         if os.path.exists(path):
                             st.image(path, width=DISPLAY_WIDTH)
                         st.markdown(
-                            "<div style=\"font-family:'Inter',sans-serif;font-size:0.79rem;"
-                            "font-weight:500;color:#12212E;line-height:1.35;"
-                            f"margin-top:0.5rem;\">{names.get(result_id, result_id)}</div>"
-                            "<div style=\"font-family:'Inter',sans-serif;font-size:0.71rem;"
-                            "color:#93A0AC;margin-top:0.15rem;letter-spacing:0.02em;\">"
-                            f"{types.get(result_id, '')} &middot; {colours.get(result_id, '')}</div>",
+                            f"<div class='item-name'>{names.get(result_id, result_id)}</div>"
+                            f"<div class='item-meta'>{types.get(result_id, '')} &middot; "
+                            f"{colours.get(result_id, '')}</div>",
                             unsafe_allow_html=True,
                         )
+                st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
