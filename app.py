@@ -620,7 +620,12 @@ with left:
     usage = st.selectbox("Occasion", sorted(df["usage"].unique()))
     look = st.selectbox("Dress style", sorted(df["look"].unique()))
     season = st.selectbox("Season", sorted(df["season"].unique()))
+<<<<<<< HEAD
     search = st.button("Find matching outfits", type="primary")
+=======
+    method = st.radio("Method", ["Hybrid", "Content-based", "Collaborative"])
+    search = st.button("Find matching items", type="primary")
+>>>>>>> a5bdb411a79fe54a3460d61b16b0e5b052d97666
     if st.button("Show me another option"):
         st.session_state["variant"] = st.session_state.get("variant", 0) + 1
         search = True
@@ -658,9 +663,18 @@ with right:
             )
             anchor_id = pool.sort_values("match", ascending=False).iloc[0]["id"]
 
+<<<<<<< HEAD
             names = df.set_index("id")["productDisplayName"]
             colours = df.set_index("id")["baseColour"]
             types = df.set_index("id")["articleType"]
+=======
+            if method == "Content-based":
+                results = get_recommendations(anchor_id, df, cosine_sim, indices, prefs, offset=variant)
+            elif method == "Collaborative":
+                results = collaborative_recommendations(anchor_id, df, item_sim, prefs, offset=variant)
+            else:
+                results = hybrid_recommendations(anchor_id, df, cosine_sim, indices, item_sim, prefs, offset=variant)
+>>>>>>> a5bdb411a79fe54a3460d61b16b0e5b052d97666
 
             methods = [
                 ("Content-based", "Item attributes: colour, style, season",
