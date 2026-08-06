@@ -479,68 +479,30 @@ def detect_colour(image, available):
 # under each method name is the structural device: it separates the three
 # recommenders without adding boxes.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Styling. Deliberately conservative: this only styles our own elements and
+# does not reach into Streamlit's internal DOM, because overriding Streamlit's
+# own containers breaks rendering when the deployed version differs from local.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Styling.
+# IMPORTANT: no blank lines are allowed inside the <style> block below. In
+# Markdown a blank line ends a raw HTML block, so everything after it would be
+# printed on the page as plain text instead of being applied as CSS.
+# ---------------------------------------------------------------------------
 st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  .stApp { background: #FBF9F5; }
-  html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: #1C2B3A; }
-
-  .wordmark {
-      font-family: 'Fraunces', serif; font-size: 2.6rem; font-weight: 600;
-      color: #1C2B3A; letter-spacing: -0.02em; line-height: 1.05; margin: 0;
-  }
-  .tagline {
-      font-size: 0.9rem; color: #7A8794; margin: 0.3rem 0 0.2rem 0;
-      letter-spacing: 0.01em;
-  }
-  .count { font-size: 0.78rem; color: #A2ADB8; letter-spacing: 0.06em;
-           text-transform: uppercase; }
-
-  .step {
-      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.14em;
-      text-transform: uppercase; color: #C08552; margin: 0.4rem 0 0.1rem 0;
-  }
-
-  .method-head { margin: 1.6rem 0 0.9rem 0; }
-  .method-name {
-      font-family: 'Fraunces', serif; font-size: 1.35rem; color: #1C2B3A;
-      margin-right: 0.7rem;
-  }
-  .method-blurb { font-size: 0.85rem; color: #7A8794; }
-
-  .item-name {
-      font-size: 0.8rem; font-weight: 500; color: #1C2B3A; line-height: 1.3;
-      margin-top: 0.45rem;
-  }
-  .item-meta { font-size: 0.72rem; color: #A2ADB8; margin-top: 0.1rem; }
-
-  .divider { height: 1px; background: #E8E2D8; margin: 1.5rem 0 0.2rem 0; }
-
-  .placeholder {
-      border: 1px dashed #DDD5C8; border-radius: 4px; padding: 2.5rem 2rem;
-      color: #7A8794; font-size: 0.92rem; line-height: 1.6; text-align: center;
-      margin-top: 1rem;
-  }
-
-  div.stButton > button[kind="primary"] {
-      background: #1C2B3A; color: #FBF9F5; border: none; border-radius: 3px;
-      font-weight: 500; letter-spacing: 0.02em;
-  }
-  div.stButton > button[kind="primary"]:hover { background: #2E4257; }
-  div.stButton > button[kind="secondary"] {
-      background: transparent; color: #1C2B3A; border: 1px solid #DDD5C8;
-      border-radius: 3px; font-weight: 500;
-  }
-  img { border-radius: 3px; }
+.block-container { padding-top: 3rem; max-width: 1500px; }
+.brass-rule { height: 3px; width: 52px; background: #B07D4F; margin-bottom: 16px; }
+.wordmark { font-family: 'Fraunces', serif; font-size: 46px; font-weight: 700; color: #12212E; letter-spacing: -1px; line-height: 1.05; margin: 0; }
+.tagline { font-family: 'Inter', sans-serif; font-size: 15px; color: #63707E; margin: 8px 0 0 0; max-width: 46ch; }
+.count { font-family: 'Inter', sans-serif; font-size: 11px; color: #93A0AC; letter-spacing: 2px; text-transform: uppercase; margin-top: 10px; }
+.hairline { height: 1px; background: #E2DACD; margin: 22px 0 6px 0; }
+.step { font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; color: #B07D4F; margin: 16px 0 6px 0; }
+.placeholder { border: 1px dashed #D8CDBC; border-radius: 6px; padding: 46px 28px; font-family: 'Inter', sans-serif; font-size: 14px; color: #63707E; line-height: 1.65; text-align: center; margin-top: 8px; }
 </style>
 """, unsafe_allow_html=True)
-
-st.markdown("<div class='wordmark'>Outfit Recommender</div>", unsafe_allow_html=True)
-st.markdown(
-    "<div class='tagline'>Upload a piece you own. Three recommender methods "
-    "each suggest what completes the look.</div>",
-    unsafe_allow_html=True,
-)
 
 if not os.path.exists(CSV_PATH) or not os.path.isdir(IMG_DIR):
     st.error(
@@ -582,11 +544,19 @@ cosine_sim = build_similarity(df)
 indices = pd.Series(df.index, index=df["id"])     # reverse map, like the practical
 item_sim = build_collaborative(df)
 
-_res = "low-res" if DISPLAY_WIDTH < 150 else "high-res"
+st.markdown("<div class='brass-rule'></div>", unsafe_allow_html=True)
+st.markdown("<div class='wordmark'>Outfit Recommender</div>", unsafe_allow_html=True)
 st.markdown(
-    f"<div class='count'>{len(df)} products in catalogue &middot; {_res} images</div>",
+    "<div class='tagline'>Upload a piece you own. Three recommender methods each "
+    "suggest what completes the look.</div>",
     unsafe_allow_html=True,
 )
+_res = "low-res" if DISPLAY_WIDTH < 150 else "high-res"
+st.markdown(
+    f"<div class='count'>{len(df)} products &nbsp;&middot;&nbsp; {_res} images</div>",
+    unsafe_allow_html=True,
+)
+st.markdown("<div class='hairline'></div>", unsafe_allow_html=True)
 
 left, right = st.columns([1, 2])
 
@@ -674,13 +644,30 @@ with right:
                                                 item_sim, prefs, offset=variant)),
             ]
 
-            for name, blurb, fn in methods:
+            for number, (name, blurb, fn) in enumerate(methods, 1):
                 results = fn()
+
+                # Inline styles throughout: class-based CSS can be overridden by
+                # Streamlit's theme, and a stylesheet can fail to apply entirely.
+                # Inline styles always render, which matters for a live demo.
                 st.markdown(
-                    f"<div class='method-head'><span class='method-name'>{name}</span>"
-                    f"<span class='method-blurb'>{blurb}</span></div>",
+                    "<div style=\"margin:34px 0 14px 0;padding:14px 18px;"
+                    "background:#12212E;border-radius:6px;\">"
+                    "<div style=\"display:flex;align-items:center;gap:14px;\">"
+                    "<span style=\"font-family:'Fraunces',serif;font-size:15px;"
+                    "font-weight:700;color:#12212E;background:#C8A06B;"
+                    "border-radius:4px;padding:3px 10px;letter-spacing:0.5px;\">"
+                    f"{number:02d}</span>"
+                    "<span style=\"font-family:'Fraunces',serif;font-size:27px;"
+                    "font-weight:700;color:#FFFFFF;letter-spacing:-0.3px;"
+                    f"line-height:1.1;\">{name}</span>"
+                    "</div>"
+                    "<div style=\"font-family:'Inter',sans-serif;font-size:14px;"
+                    f"color:#C3CDD6;margin-top:7px;margin-left:2px;\">{blurb}</div>"
+                    "</div>",
                     unsafe_allow_html=True,
                 )
+
                 if not results:
                     st.warning("No matches with this method. Try different filters.")
                     continue
@@ -692,9 +679,11 @@ with right:
                         if os.path.exists(path):
                             st.image(path, width=DISPLAY_WIDTH)
                         st.markdown(
-                            f"<div class='item-name'>{names.get(result_id, result_id)}</div>"
-                            f"<div class='item-meta'>{types.get(result_id, '')} &middot; "
-                            f"{colours.get(result_id, '')}</div>",
+                            "<div style=\"font-family:'Inter',sans-serif;font-size:0.79rem;"
+                            "font-weight:500;color:#12212E;line-height:1.35;"
+                            f"margin-top:0.5rem;\">{names.get(result_id, result_id)}</div>"
+                            "<div style=\"font-family:'Inter',sans-serif;font-size:0.71rem;"
+                            "color:#93A0AC;margin-top:0.15rem;letter-spacing:0.02em;\">"
+                            f"{types.get(result_id, '')} &middot; {colours.get(result_id, '')}</div>",
                             unsafe_allow_html=True,
                         )
-                st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
